@@ -6,11 +6,15 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from separate_dynamic_static_events import (  # noqa: E402
+    AsyncSeparatedEventVoxelizer,
+    ReusableSeparatedEventVoxelizer,
+    SeparatedEventVoxelRing,
     StreamingMotionSeparator,
     ego_geometry,
     fuse_motion_lighting,
     robust_motion_calibration,
     voxelize_separated_events,
+    voxelize_separated_events_torch,
 )
 
 
@@ -175,3 +179,118 @@ def test_fused_separated_voxelizer_uses_polarity_time_and_illumination():
     assert static[0, 1, 0, 0] == 1.0
     assert static[1, 0, 1, 1] == 1.0
     assert static[1, 1, 1, 1] == 0.0
+
+
+def test_torch_voxelizer_matches_numpy_on_cpu():
+    confidence = {
+        "q_static": np.full((4, 4), 0.75, np.float32),
+        "q_dynamic": np.full((4, 4), 0.25, np.float32),
+        "q_illumination": np.full((4, 4), 0.1, np.float32),
+    }
+    args = dict(
+        x=np.array([0, 1, 2, 3], np.uint16),
+        y=np.array([0, 1, 2, 3], np.uint16),
+        timestamps=np.array([0.001, 0.002, 0.011, 0.012]),
+        polarity=np.array([-1, 1, -1, 1], np.int8),
+        confidence_maps=confidence,
+        start_time=0.0,
+        num_bins=2,
+        bin_seconds=0.01,
+        output_size=(2, 2),
+    )
+    expected = voxelize_separated_events(**args)
+    actual = voxelize_separated_events_torch(**args, device="cpu")
+    np.testing.assert_allclose(actual[0].numpy(), expected[0], atol=1e-6)
+    np.testing.assert_allclose(actual[1].numpy(), expected[1], atol=1e-6)
+
+
+def test_mirrored_voxel_ring_returns_contiguous_chronological_history():
+    ring = SeparatedEventVoxelRing(history_bins=4, output_size=(2, 2))
+    for value in range(1, 7):
+        static = np.full((1, 2, 2, 2), value, np.float32)
+        dynamic = -static
+        history_static, history_dynamic = ring.append(static, dynamic)
+    assert history_static.flags.c_contiguous
+    assert history_dynamic.flags.c_contiguous
+    np.testing.assert_array_equal(history_static[:, 0, 0, 0], [3, 4, 5, 6])
+    np.testing.assert_array_equal(history_dynamic[:, 0, 0, 0], [-3, -4, -5, -6])
+
+
+def test_async_voxelizer_matches_synchronous_result():
+    confidence = {
+        "q_static": np.ones((2, 2), np.float32),
+        "q_dynamic": np.full((2, 2), 0.5, np.float32),
+        "q_illumination": np.zeros((2, 2), np.float32),
+    }
+    args = dict(
+        x=np.array([0, 1], np.uint16),
+        y=np.array([0, 1], np.uint16),
+        timestamps=np.array([0.001, 0.011]),
+        polarity=np.array([-1, 1], np.int8),
+        confidence_maps=confidence,
+        start_time=0.0,
+        num_bins=2,
+        bin_seconds=0.01,
+        output_size=(2, 2),
+    )
+    expected = voxelize_separated_events(**args)
+    with AsyncSeparatedEventVoxelizer() as voxelizer:
+        voxelizer.submit(**args)
+        actual = voxelizer.result()
+    np.testing.assert_array_equal(actual[0], expected[0])
+    np.testing.assert_array_equal(actual[1], expected[1])
+
+
+def test_reusable_voxelizer_matches_generic_and_reuses_capacity():
+    confidence = {
+        "q_static": np.full((4, 4), 0.7, np.float32),
+        "q_dynamic": np.full((4, 4), 0.3, np.float32),
+        "q_illumination": np.full((4, 4), 0.2, np.float32),
+    }
+    args = dict(
+        x=np.array([0, 1, 2, 3], np.uint16),
+        y=np.array([0, 1, 2, 3], np.uint16),
+        timestamps=np.array([0.001, 0.002, 0.011, 0.012]),
+        polarity=np.array([-1, 1, -1, 1], np.int8),
+        confidence_maps=confidence,
+        start_time=0.0,
+        num_bins=2,
+        bin_seconds=0.01,
+        output_size=(2, 2),
+    )
+    expected = voxelize_separated_events(**args)
+    reusable = ReusableSeparatedEventVoxelizer(
+        source_size=(4, 4), output_size=(2, 2)
+    )
+    call_args = dict(args)
+    call_args.pop("output_size")
+    actual = reusable.voxelize(**call_args)
+    capacity = reusable.capacity
+    second = reusable.voxelize(**call_args)
+    assert reusable.capacity == capacity
+    np.testing.assert_allclose(actual[0], expected[0], atol=1e-6)
+    np.testing.assert_allclose(actual[1], expected[1], atol=1e-6)
+    np.testing.assert_array_equal(second[0], actual[0])
+    np.testing.assert_array_equal(second[1], actual[1])
+
+
+def test_reusable_voxelizer_does_not_overflow_uint16_pixel_coordinates():
+    confidence = {
+        "q_static": np.ones((360, 480), np.float32),
+        "q_dynamic": np.full((360, 480), 0.5, np.float32),
+        "q_illumination": np.zeros((360, 480), np.float32),
+    }
+    args = dict(
+        x=np.array([479], np.uint16),
+        y=np.array([359], np.uint16),
+        timestamps=np.array([0.001]),
+        polarity=np.array([1], np.int8),
+        confidence_maps=confidence,
+        start_time=0.0,
+        num_bins=1,
+        bin_seconds=0.01,
+    )
+    expected = voxelize_separated_events(**args)
+    actual = ReusableSeparatedEventVoxelizer().voxelize(**args)
+    np.testing.assert_array_equal(actual[0], expected[0])
+    np.testing.assert_array_equal(actual[1], expected[1])

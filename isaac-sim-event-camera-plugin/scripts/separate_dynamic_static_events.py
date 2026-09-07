@@ -249,6 +249,366 @@ def voxelize_separated_events(
     return static, dynamic
 
 
+def voxelize_separated_events_torch(
+    x,
+    y,
+    timestamps,
+    polarity,
+    confidence_maps,
+    *,
+    start_time,
+    num_bins,
+    bin_seconds,
+    output_size=(96, 128),
+    clip_count=8.0,
+    device="cuda",
+):
+    """Torch/CUDA equivalent of :func:`voxelize_separated_events`.
+
+    Importing torch is delayed so the NumPy/OpenCV streaming path keeps a
+    lightweight startup.  Passing an unavailable CUDA device raises a clear
+    error instead of silently moving a real-time pipeline back to CPU.
+    """
+    import torch
+
+    target = torch.device(device)
+    if target.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA voxelization requested but CUDA is unavailable")
+
+    def tensor(value, dtype=None):
+        return torch.as_tensor(value, dtype=dtype, device=target)
+
+    x = tensor(x, torch.long)
+    y = tensor(y, torch.long)
+    timestamps = tensor(timestamps, torch.float64)
+    polarity = tensor(polarity)
+    q_static = tensor(confidence_maps["q_static"], torch.float32)
+    q_dynamic = tensor(confidence_maps["q_dynamic"], torch.float32)
+    q_illumination = tensor(confidence_maps["q_illumination"], torch.float32)
+    map_h, map_w = q_static.shape
+    out_h, out_w = output_size
+    voxel_shape = (int(num_bins), 2, int(out_h), int(out_w))
+    output_size_flat = int(np.prod(voxel_shape))
+    if timestamps.numel() == 0:
+        empty = torch.zeros(voxel_shape, dtype=torch.float32, device=target)
+        return empty, empty.clone()
+
+    time_bin = torch.floor((timestamps - start_time) / bin_seconds).long()
+    output_x = torch.div(x * out_w, map_w, rounding_mode="floor")
+    output_y = torch.div(y * out_h, map_h, rounding_mode="floor")
+    valid = (
+        (time_bin >= 0)
+        & (time_bin < num_bins)
+        & (x >= 0)
+        & (x < map_w)
+        & (y >= 0)
+        & (y < map_h)
+        & (output_x >= 0)
+        & (output_x < out_w)
+        & (output_y >= 0)
+        & (output_y < out_h)
+    )
+    x = x[valid]
+    y = y[valid]
+    flat_index = (
+        ((time_bin[valid] * 2 + (polarity[valid] > 0)) * out_h + output_y[valid])
+        * out_w
+        + output_x[valid]
+    )
+    illumination_keep = 1.0 - q_illumination[y, x]
+    static = torch.bincount(
+        flat_index,
+        weights=q_static[y, x] * illumination_keep,
+        minlength=output_size_flat,
+    ).reshape(voxel_shape)
+    dynamic = torch.bincount(
+        flat_index,
+        weights=q_dynamic[y, x] * illumination_keep,
+        minlength=output_size_flat,
+    ).reshape(voxel_shape)
+    if clip_count > 0:
+        static.clamp_max_(clip_count).log1p_().div_(np.log1p(clip_count))
+        dynamic.clamp_max_(clip_count).log1p_().div_(np.log1p(clip_count))
+    return static, dynamic
+
+
+class ReusableSeparatedEventVoxelizer:
+    """Exact NumPy voxelizer with reusable event-sized work buffers.
+
+    Raw camera streams have fixed image bounds and the timestamp ring already
+    selects one exact interval.  ``assume_valid=True`` uses that contract to
+    skip seven full event-array validation/filter passes.  Set it to false for
+    imported or otherwise untrusted event files.
+    """
+
+    def __init__(
+        self,
+        source_size=(360, 480),
+        output_size=(96, 128),
+        initial_capacity=0,
+    ):
+        self.source_size = tuple(source_size)
+        self.output_size = tuple(output_size)
+        src_h, src_w = self.source_size
+        out_h, out_w = self.output_size
+        source_y, source_x = np.indices(self.source_size, dtype=np.int64)
+        output_x = (source_x * out_w) // src_w
+        output_y = (source_y * out_h) // src_h
+        self._pixel_to_output = (output_y * out_w + output_x).ravel()
+        self._capacity = 0
+        self._source_index = None
+        self._flat_index = None
+        self._relative_time = None
+        self._positive = None
+        self._static_weight = None
+        self._dynamic_weight = None
+        self._illumination_keep = None
+        self._ensure_capacity(int(initial_capacity))
+
+    @property
+    def capacity(self):
+        return self._capacity
+
+    def _ensure_capacity(self, required):
+        if required <= self._capacity:
+            return
+        capacity = max(1024, self._capacity)
+        while capacity < required:
+            capacity *= 2
+        self._capacity = capacity
+        self._source_index = np.empty(capacity, np.int64)
+        self._flat_index = np.empty(capacity, np.int64)
+        self._relative_time = np.empty(capacity, np.float64)
+        self._positive = np.empty(capacity, bool)
+        self._static_weight = np.empty(capacity, np.float32)
+        self._dynamic_weight = np.empty(capacity, np.float32)
+        self._illumination_keep = np.empty(capacity, np.float32)
+
+    def voxelize(
+        self,
+        x,
+        y,
+        timestamps,
+        polarity,
+        confidence_maps,
+        *,
+        start_time,
+        num_bins,
+        bin_seconds,
+        clip_count=8.0,
+        assume_valid=True,
+    ):
+        n_events = len(timestamps)
+        voxel_shape = (int(num_bins), 2, *self.output_size)
+        output_size_flat = int(np.prod(voxel_shape))
+        if n_events == 0:
+            empty = np.zeros(voxel_shape, np.float32)
+            return empty, empty.copy()
+        if not (len(x) == len(y) == len(polarity) == n_events):
+            raise ValueError("x/y/timestamps/polarity must have equal lengths")
+        self._ensure_capacity(n_events)
+        source_index = self._source_index[:n_events]
+        flat_index = self._flat_index[:n_events]
+        relative_time = self._relative_time[:n_events]
+        positive = self._positive[:n_events]
+        static_weight = self._static_weight[:n_events]
+        dynamic_weight = self._dynamic_weight[:n_events]
+        illumination_keep = self._illumination_keep[:n_events]
+        src_h, src_w = self.source_size
+        out_h, out_w = self.output_size
+
+        if not assume_valid:
+            x_values = np.asarray(x)
+            y_values = np.asarray(y)
+            timestamp_values = np.asarray(timestamps)
+            valid = (
+                (x_values >= 0)
+                & (x_values < src_w)
+                & (y_values >= 0)
+                & (y_values < src_h)
+                & (timestamp_values >= start_time)
+                & (timestamp_values < start_time + num_bins * bin_seconds)
+            )
+            if not np.all(valid):
+                return voxelize_separated_events(
+                    x_values,
+                    y_values,
+                    timestamp_values,
+                    polarity,
+                    confidence_maps,
+                    start_time=start_time,
+                    num_bins=num_bins,
+                    bin_seconds=bin_seconds,
+                    output_size=self.output_size,
+                    clip_count=clip_count,
+                )
+
+        # Gather the three confidence maps while source_index still contains
+        # source pixels; it is then safely reused as the temporal-bin buffer.
+        # Force int64 arithmetic before writing the result.  The camera stores
+        # coordinates as uint16, where ``y * width`` would otherwise overflow.
+        np.multiply(
+            y, src_w, out=source_index, dtype=np.int64, casting="unsafe"
+        )
+        np.add(
+            source_index,
+            x,
+            out=source_index,
+            dtype=np.int64,
+            casting="unsafe",
+        )
+        np.take(
+            confidence_maps["q_static"].reshape(-1),
+            source_index,
+            out=static_weight,
+        )
+        np.take(
+            confidence_maps["q_dynamic"].reshape(-1),
+            source_index,
+            out=dynamic_weight,
+        )
+        np.take(
+            confidence_maps["q_illumination"].reshape(-1),
+            source_index,
+            out=illumination_keep,
+        )
+        np.subtract(1.0, illumination_keep, out=illumination_keep)
+        np.multiply(static_weight, illumination_keep, out=static_weight)
+        np.multiply(dynamic_weight, illumination_keep, out=dynamic_weight)
+        np.take(self._pixel_to_output, source_index, out=flat_index)
+
+        np.subtract(timestamps, start_time, out=relative_time)
+        np.divide(relative_time, bin_seconds, out=relative_time)
+        np.floor(relative_time, out=relative_time)
+        np.copyto(source_index, relative_time, casting="unsafe")
+        np.greater(polarity, 0, out=positive)
+        np.multiply(source_index, 2, out=source_index)
+        np.add(source_index, positive, out=source_index, casting="unsafe")
+        np.multiply(source_index, out_h * out_w, out=source_index)
+        np.add(flat_index, source_index, out=flat_index)
+
+        static = np.bincount(
+            flat_index, weights=static_weight, minlength=output_size_flat
+        ).astype(np.float32, copy=False).reshape(voxel_shape)
+        dynamic = np.bincount(
+            flat_index, weights=dynamic_weight, minlength=output_size_flat
+        ).astype(np.float32, copy=False).reshape(voxel_shape)
+        if clip_count > 0:
+            normalizer = np.float32(np.log1p(clip_count))
+            np.minimum(static, clip_count, out=static)
+            np.minimum(dynamic, clip_count, out=dynamic)
+            np.log1p(static, out=static)
+            np.log1p(dynamic, out=dynamic)
+            static /= normalizer
+            dynamic /= normalizer
+        return static, dynamic
+
+
+class SeparatedEventVoxelRing:
+    """Allocation-free chronological history for online event voxel bins.
+
+    Every bin is mirrored into a second half of the buffer.  Consequently the
+    latest history is always one contiguous slice, even after wrap-around; no
+    ``np.roll`` or ``concatenate`` is needed before creating a torch tensor.
+    Returned views remain valid until the next :meth:`append` call.
+    """
+
+    def __init__(self, history_bins=8, output_size=(96, 128), dtype=np.float32):
+        self.history_bins = int(history_bins)
+        self.output_size = tuple(output_size)
+        if self.history_bins < 1:
+            raise ValueError("history_bins must be positive")
+        shape = (2 * self.history_bins, 2, *self.output_size)
+        self.static = np.zeros(shape, dtype=dtype)
+        self.dynamic = np.zeros(shape, dtype=dtype)
+        self.cursor = 0
+        self.filled = 0
+
+    def reset(self):
+        self.static.fill(0)
+        self.dynamic.fill(0)
+        self.cursor = 0
+        self.filled = 0
+
+    def append(self, static_bins, dynamic_bins):
+        static_bins = np.asarray(static_bins, dtype=self.static.dtype)
+        dynamic_bins = np.asarray(dynamic_bins, dtype=self.dynamic.dtype)
+        expected_tail = (2, *self.output_size)
+        if (
+            static_bins.ndim != 4
+            or dynamic_bins.shape != static_bins.shape
+            or static_bins.shape[1:] != expected_tail
+        ):
+            raise ValueError(
+                "static/dynamic bins must share shape [T,2,H,W] matching the ring"
+            )
+        # More than one full history only needs its newest bins.
+        static_bins = static_bins[-self.history_bins :]
+        dynamic_bins = dynamic_bins[-self.history_bins :]
+        for static_bin, dynamic_bin in zip(static_bins, dynamic_bins):
+            np.copyto(self.static[self.cursor], static_bin)
+            np.copyto(self.static[self.cursor + self.history_bins], static_bin)
+            np.copyto(self.dynamic[self.cursor], dynamic_bin)
+            np.copyto(self.dynamic[self.cursor + self.history_bins], dynamic_bin)
+            self.cursor = (self.cursor + 1) % self.history_bins
+            self.filled = min(self.history_bins, self.filled + 1)
+        return self.history()
+
+    def history(self):
+        start = self.cursor
+        return (
+            self.static[start : start + self.history_bins],
+            self.dynamic[start : start + self.history_bins],
+        )
+
+    def torch_history(self, device=None):
+        """Return `[1,T,2,H,W]` tensors, copying only for non-CPU devices."""
+        import torch
+
+        static, dynamic = self.history()
+        static = torch.from_numpy(static).unsqueeze(0)
+        dynamic = torch.from_numpy(dynamic).unsqueeze(0)
+        if device is not None:
+            static = static.to(device=device, non_blocking=True)
+            dynamic = dynamic.to(device=device, non_blocking=True)
+        return static, dynamic
+
+
+class AsyncSeparatedEventVoxelizer:
+    """Single-worker voxelizer for overlapping interval aggregation with I/O."""
+
+    def __init__(self, voxelize_fn=voxelize_separated_events):
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="event-voxel"
+        )
+        self._voxelize_fn = voxelize_fn
+        self._pending = None
+
+    def submit(self, *args, **kwargs):
+        if self._pending is not None and not self._pending.done():
+            raise RuntimeError("consume the pending voxel result before submitting")
+        self._pending = self._executor.submit(self._voxelize_fn, *args, **kwargs)
+        return self._pending
+
+    def result(self):
+        if self._pending is None:
+            raise RuntimeError("no pending voxelization")
+        result = self._pending.result()
+        self._pending = None
+        return result
+
+    def close(self):
+        self._executor.shutdown(wait=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+
 class StreamingMotionSeparator:
     """Causal, fixed-calibration motion separator for one camera stream.
 
@@ -315,8 +675,59 @@ class StreamingMotionSeparator:
         self._yy = yy
         self._ray_x = (xx - cx) / fx
         self._ray_y = (yy - cy) / fy
+        float_buffers = (
+            "x0",
+            "y0",
+            "x1",
+            "y1",
+            "z1",
+            "temporary",
+            "map_x",
+            "map_y",
+            "sampled_depth",
+            "depth_error",
+            "gray0",
+            "gray1",
+            "sampled_gray1",
+            "light_error",
+            "chroma_sum0",
+            "chroma_sum1",
+            "color_error",
+            "relative_flow",
+            "ego_magnitude",
+        )
+        self._scratch = {
+            name: np.empty((height, width), np.float32)
+            for name in float_buffers
+        }
+        self._flow = np.empty((height, width, 2), np.float32)
+        self._chroma0 = np.empty((height, width, 3), np.float32)
+        self._chroma1 = np.empty((height, width, 3), np.float32)
+        self._sampled_chroma1 = np.empty((height, width, 3), np.float32)
+        self._gray_u8_0 = np.empty((height, width), np.uint8)
+        self._gray_u8_1 = np.empty((height, width), np.uint8)
+        self._valid = np.empty((height, width), bool)
         self._geometry_signature = signature
         self._previous_flow_confidence = None
+
+    @staticmethod
+    def _gray_log_into(rgb, gray_u8, output):
+        cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2GRAY, dst=gray_u8)
+        np.copyto(output, gray_u8, casting="unsafe")
+        np.log1p(output, out=output)
+        return output
+
+    @staticmethod
+    def _chromaticity_into(rgb, output, channel_sum):
+        np.copyto(output, rgb, casting="unsafe")
+        output += 1.0
+        np.add(output[..., 0], output[..., 1], out=channel_sum)
+        np.add(channel_sum, output[..., 2], out=channel_sum)
+        np.maximum(channel_sum, 1e-6, out=channel_sum)
+        np.divide(output[..., 0], channel_sum, out=output[..., 0])
+        np.divide(output[..., 1], channel_sum, out=output[..., 1])
+        np.divide(output[..., 2], channel_sum, out=output[..., 2])
+        return output
 
     def _ego_geometry(self, depth, pose0, pose1, intrinsics):
         depth = np.asarray(depth, dtype=np.float32).squeeze()
@@ -331,47 +742,52 @@ class StreamingMotionSeparator:
         relative_rotation = r0.T @ r1
         relative_translation = (pose0[:3] - pose1[:3]) @ r1
 
-        x0 = self._ray_x * depth
-        y0 = self._ray_y * depth
-        x1 = (
-            x0 * relative_rotation[0, 0]
-            + y0 * relative_rotation[1, 0]
-            + depth * relative_rotation[2, 0]
-            + relative_translation[0]
-        )
-        y1 = (
-            x0 * relative_rotation[0, 1]
-            + y0 * relative_rotation[1, 1]
-            + depth * relative_rotation[2, 1]
-            + relative_translation[1]
-        )
-        z1 = (
-            x0 * relative_rotation[0, 2]
-            + y0 * relative_rotation[1, 2]
-            + depth * relative_rotation[2, 2]
-            + relative_translation[2]
-        )
+        scratch = self._scratch
+        x0, y0 = scratch["x0"], scratch["y0"]
+        x1, y1, z1 = scratch["x1"], scratch["y1"], scratch["z1"]
+        temporary = scratch["temporary"]
+        np.multiply(self._ray_x, depth, out=x0)
+        np.multiply(self._ray_y, depth, out=y0)
+
+        def transform_component(output, column, translation):
+            np.multiply(x0, float(relative_rotation[0, column]), out=output)
+            np.multiply(y0, float(relative_rotation[1, column]), out=temporary)
+            np.add(output, temporary, out=output)
+            np.multiply(depth, float(relative_rotation[2, column]), out=temporary)
+            np.add(output, temporary, out=output)
+            output += float(translation)
+
+        transform_component(x1, 0, relative_translation[0])
+        transform_component(y1, 1, relative_translation[1])
+        transform_component(z1, 2, relative_translation[2])
         with np.errstate(divide="ignore", invalid="ignore"):
-            u1 = fx * x1 / z1 + cx
-            v1 = fy * y1 / z1 + cy
-        flow = np.empty((*depth.shape, 2), np.float32)
-        flow[..., 0] = u1 - self._xx
-        flow[..., 1] = v1 - self._yy
-        valid = (
-            np.isfinite(depth)
-            & np.isfinite(flow).all(axis=-1)
-            & np.isfinite(z1)
-            & (depth > 0.02)
-            & (depth < 100.0)
-            & (z1 > 0.02)
-            & (u1 >= -1e-4)
-            & (u1 <= depth.shape[1] - 1 + 1e-4)
-            & (v1 >= -1e-4)
-            & (v1 <= depth.shape[0] - 1 + 1e-4)
-        )
+            np.divide(x1, z1, out=self._flow[..., 0])
+            np.divide(y1, z1, out=self._flow[..., 1])
+        self._flow[..., 0] *= fx
+        self._flow[..., 1] *= fy
+        self._flow[..., 0] += cx
+        self._flow[..., 1] += cy
+        np.copyto(scratch["map_x"], self._flow[..., 0])
+        np.copyto(scratch["map_y"], self._flow[..., 1])
+        self._flow[..., 0] -= self._xx
+        self._flow[..., 1] -= self._yy
+
+        valid = self._valid
+        np.isfinite(depth, out=valid)
+        valid &= np.isfinite(self._flow[..., 0])
+        valid &= np.isfinite(self._flow[..., 1])
+        valid &= np.isfinite(z1)
+        valid &= depth > 0.02
+        valid &= depth < 100.0
+        valid &= z1 > 0.02
+        valid &= scratch["map_x"] >= -1e-4
+        valid &= scratch["map_x"] <= depth.shape[1] - 1 + 1e-4
+        valid &= scratch["map_y"] >= -1e-4
+        valid &= scratch["map_y"] <= depth.shape[0] - 1 + 1e-4
+        flow = self._flow
         flow[~valid] = 0.0
         z1[~valid] = 0.0
-        return flow, z1.astype(np.float32, copy=False), valid
+        return flow, z1, valid
 
     def step(
         self,
@@ -397,35 +813,46 @@ class StreamingMotionSeparator:
         ego, predicted_depth, valid = self._ego_geometry(
             depth0, pose0, pose1, intrinsics
         )
-        map_x = self._xx + ego[..., 0]
-        map_y = self._yy + ego[..., 1]
+        scratch = self._scratch
+        map_x, map_y = scratch["map_x"], scratch["map_y"]
 
-        flow_error = np.hypot(
-            self.motion_gain * observed_motion[..., 0] - ego[..., 0],
-            self.motion_gain * observed_motion[..., 1] - ego[..., 1],
-        )
+        # x0/y0 are no longer needed after projection, so reuse them for the
+        # observed-flow residual instead of allocating two more HxW arrays.
+        residual_x, residual_y = scratch["x0"], scratch["y0"]
+        flow_error = scratch["x1"]
+        np.multiply(observed_motion[..., 0], self.motion_gain, out=residual_x)
+        np.subtract(residual_x, ego[..., 0], out=residual_x)
+        np.multiply(observed_motion[..., 1], self.motion_gain, out=residual_y)
+        np.subtract(residual_y, ego[..., 1], out=residual_y)
+        np.hypot(residual_x, residual_y, out=flow_error)
         sampled_depth = cv2.remap(
             depth1,
             map_x,
             map_y,
             interpolation=cv2.INTER_LINEAR,
+            dst=scratch["sampled_depth"],
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=float("nan"),
         )
-        relative_depth_error = np.abs(sampled_depth - predicted_depth)
-        relative_depth_error /= np.maximum(predicted_depth, 0.05)
+        relative_depth_error = scratch["depth_error"]
+        np.subtract(sampled_depth, predicted_depth, out=relative_depth_error)
+        np.abs(relative_depth_error, out=relative_depth_error)
+        np.maximum(predicted_depth, 0.05, out=scratch["temporary"])
+        np.divide(relative_depth_error, scratch["temporary"], out=relative_depth_error)
 
-        log0 = _gray_log(rgb0)
-        log1 = _gray_log(rgb1)
+        log0 = self._gray_log_into(rgb0, self._gray_u8_0, scratch["gray0"])
+        log1 = self._gray_log_into(rgb1, self._gray_u8_1, scratch["gray1"])
         sampled_log1 = cv2.remap(
             log1,
             map_x,
             map_y,
             interpolation=cv2.INTER_LINEAR,
+            dst=scratch["sampled_gray1"],
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=float("nan"),
         )
-        log_delta = sampled_log1 - log0
+        log_delta = sampled_log1
+        np.subtract(log_delta, log0, out=log_delta)
 
         # Compute the depth discontinuity once.  Radius-two edges are one
         # additional 3x3 dilation of the already radius-one mask.
@@ -438,19 +865,33 @@ class StreamingMotionSeparator:
             & ~edge1
         )
         exposure_shift = float(np.median(log_delta[base])) if np.any(base) else 0.0
-        light_error = np.abs(log_delta - exposure_shift)
+        light_error = scratch["light_error"]
+        np.subtract(log_delta, exposure_shift, out=light_error)
+        np.abs(light_error, out=light_error)
 
-        chroma0 = _chromaticity(rgb0)
-        chroma1 = _chromaticity(rgb1)
+        chroma0 = self._chromaticity_into(
+            rgb0, self._chroma0, scratch["chroma_sum0"]
+        )
+        chroma1 = self._chromaticity_into(
+            rgb1, self._chroma1, scratch["chroma_sum1"]
+        )
         sampled_chroma1 = cv2.remap(
             chroma1,
             map_x,
             map_y,
             interpolation=cv2.INTER_LINEAR,
+            dst=self._sampled_chroma1,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=float("nan"),
         )
-        color_error = np.linalg.norm(sampled_chroma1 - chroma0, axis=-1)
+        np.subtract(sampled_chroma1, chroma0, out=sampled_chroma1)
+        color_error = scratch["color_error"]
+        np.square(sampled_chroma1[..., 0], out=color_error)
+        np.square(sampled_chroma1[..., 1], out=scratch["temporary"])
+        np.add(color_error, scratch["temporary"], out=color_error)
+        np.square(sampled_chroma1[..., 2], out=scratch["temporary"])
+        np.add(color_error, scratch["temporary"], out=color_error)
+        np.sqrt(color_error, out=color_error)
 
         valid &= (
             np.isfinite(flow_error)
@@ -470,8 +911,11 @@ class StreamingMotionSeparator:
         photo_threshold = self.thresholds["photo_threshold_log"]
         chroma_threshold = self.thresholds["chroma_threshold"]
 
-        ego_magnitude = np.hypot(ego[..., 0], ego[..., 1])
-        relative_flow_residual = flow_error / (1.0 + ego_magnitude)
+        ego_magnitude = scratch["ego_magnitude"]
+        np.hypot(ego[..., 0], ego[..., 1], out=ego_magnitude)
+        ego_magnitude += 1.0
+        relative_flow_residual = scratch["relative_flow"]
+        np.divide(flow_error, ego_magnitude, out=relative_flow_residual)
         absolute_flow_confidence = _sigmoid(
             (flow_error - flow_threshold) / max(0.12, 0.25 * flow_threshold)
         ) * reliable
@@ -508,7 +952,9 @@ class StreamingMotionSeparator:
         else:
             neighbor = _dilate_float(self._previous_flow_confidence, radius=3)
         persistent = np.sqrt(np.clip(flow_confidence * neighbor, 0.0, 1.0))
-        self._previous_flow_confidence = flow_confidence.copy()
+        if self._previous_flow_confidence is None:
+            self._previous_flow_confidence = np.empty_like(flow_confidence)
+        np.copyto(self._previous_flow_confidence, flow_confidence)
 
         static, dynamic, illumination, unknown = fuse_motion_lighting(
             flow_confidence,
