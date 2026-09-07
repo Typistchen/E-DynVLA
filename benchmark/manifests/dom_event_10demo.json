@@ -1,0 +1,418 @@
+{
+  "format": "edynvla-dom-event-manifest-v1",
+  "dataset_root": "${EDYNVLA_DATA_ROOT}",
+  "source_root_name": "motion_separation_10",
+  "sensor": "wrist_cam",
+  "fps": 25.0,
+  "model_inputs": [
+    "DOM RGB",
+    "DOM robot state",
+    "language instruction",
+    "q_static event history",
+    "q_dynamic event history"
+  ],
+  "evaluation_only": [
+    "segmentation",
+    "object_vel"
+  ],
+  "episodes": [
+    {
+      "name": "demo1",
+      "dom_h5": "demo1/pick_franka_fcan18d_O02_00000001_6924.h5",
+      "event_h5": "demo1/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo1/pick_franka_fcan18d_O02_00000001_6924.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "food can",
+          "blue food can"
+        ],
+        "containers": [
+          "wooden bowl",
+          "wooden shallow bowl",
+          "bowl",
+          "shallow bowl",
+          "dark brown bowl",
+          "light brown wooden bowl"
+        ]
+      },
+      "frame_count": 89,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 18072189,
+      "event_start_s": 0.08052430744030571,
+      "event_end_s": 3.629998519144814,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo2",
+      "dom_h5": "demo2/pick_franka_cup06d_O02_00000002_d361.h5",
+      "event_h5": "demo2/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo2/pick_franka_cup06d_O02_00000002_d361.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "white tall cup",
+          "cup",
+          "tall cup",
+          "white cup"
+        ],
+        "containers": [
+          "plate with blue floral patterns",
+          "ceramic plate with blue floral patterns",
+          "plate",
+          "ceramic plate"
+        ]
+      },
+      "frame_count": 158,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 11283669,
+      "event_start_s": 0.0802047810111726,
+      "event_end_s": 6.389868239021401,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo3",
+      "dom_h5": "demo3/pick_franka_apple07d_O02_00000003_ff00.h5",
+      "event_h5": "demo3/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo3/pick_franka_apple07d_O02_00000003_ff00.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "red round apple",
+          "red apple",
+          "apple",
+          "round apple"
+        ],
+        "containers": [
+          "white tray with Shell logo",
+          "tray",
+          "tray with Shell logo",
+          "white tray"
+        ]
+      },
+      "frame_count": 37,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 6810220,
+      "event_start_s": 0.08062314645824156,
+      "event_end_s": 1.5549999341676037,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo4",
+      "dom_h5": "demo4/pick_franka_apple14d_O02_00000004_f678.h5",
+      "event_h5": "demo4/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo4/pick_franka_apple14d_O02_00000004_f678.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "red apple",
+          "red round apple",
+          "apple",
+          "round apple"
+        ],
+        "containers": [
+          "plate",
+          "yellow plate",
+          "plate with red square patterns",
+          "yellow plate with red square patterns"
+        ]
+      },
+      "frame_count": 250,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 36776201,
+      "event_start_s": 0.08086272425422794,
+      "event_end_s": 10.074999543110192,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo5",
+      "dom_h5": "demo5/pick_franka_apple19d_O02_00000005_267d.h5",
+      "event_h5": "demo5/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo5/pick_franka_apple19d_O02_00000005_267d.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "apple",
+          "red apple",
+          "round apple",
+          "red round apple"
+        ],
+        "containers": [
+          "plate",
+          "white plate"
+        ]
+      },
+      "frame_count": 87,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 16134955,
+      "event_start_s": 0.08041535906658025,
+      "event_end_s": 3.5499997358956374,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo6",
+      "dom_h5": "demo6/pick_franka_peach06d_O02_00000006_fb24.h5",
+      "event_h5": "demo6/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo6/pick_franka_peach06d_O02_00000006_fb24.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "peach",
+          "white peach"
+        ],
+        "containers": [
+          "white box",
+          "plastic box",
+          "box with Tencent Logo",
+          "white box with Tencent Logo",
+          "box"
+        ]
+      },
+      "frame_count": 93,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 10296487,
+      "event_start_s": 0.0804817962476571,
+      "event_end_s": 3.7899998122726304,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo7",
+      "dom_h5": "demo7/pick_franka_avocado02d_O02_00000007_b691.h5",
+      "event_h5": "demo7/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo7/pick_franka_avocado02d_O02_00000007_b691.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "green pear-shaped long avocado",
+          "green avocado",
+          "avocado",
+          "pear-shaped long avocado"
+        ],
+        "containers": [
+          "bowl with black stripes",
+          "bowl",
+          "deep bowl",
+          "ceramic bowl",
+          "deep bowl with black stripes",
+          "ceramic deep bowl",
+          "ceramic bowl with black stripes",
+          "ceramic deep bowl with black stripes"
+        ]
+      },
+      "frame_count": 250,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 22985573,
+      "event_start_s": 0.08039298692488764,
+      "event_end_s": 10.069927716081688,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo8",
+      "dom_h5": "demo8/pick_franka_cup07d_O02_00000008_4929.h5",
+      "event_h5": "demo8/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo8/pick_franka_cup07d_O02_00000008_4929.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "cup",
+          "tall cup",
+          "yellow cup",
+          "yellow tall cup"
+        ],
+        "containers": [
+          "white plate",
+          "plate",
+          "plate with black edge",
+          "white plate with black edge",
+          "plate with black edge and dragon patterns",
+          "white plate with dragon patterns",
+          "white plate with black edge and dragon patterns",
+          "plate with dragon patterns"
+        ]
+      },
+      "frame_count": 250,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 63526903,
+      "event_start_s": 0.08039028247910308,
+      "event_end_s": 10.069926241352277,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo9",
+      "dom_h5": "demo9/pick_franka_potato17d_O02_00000009_8e89.h5",
+      "event_h5": "demo9/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo9/pick_franka_potato17d_O02_00000009_8e89.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "light color potato",
+          "potato",
+          "round potato",
+          "light color round potato"
+        ],
+        "containers": [
+          "plate",
+          "white plate"
+        ]
+      },
+      "frame_count": 59,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 16350615,
+      "event_start_s": 0.08055010280448074,
+      "event_end_s": 2.4349999455735087,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    },
+    {
+      "name": "demo10",
+      "dom_h5": "demo10/pick_franka_potato14d_O02_00000010_2699.h5",
+      "event_h5": "demo10/motion_separation_v2/wrist_cam_motion_separated_events.h5",
+      "metadata_json": "demo10/pick_franka_potato14d_O02_00000010_2699.json",
+      "instruction": {
+        "task": "pick",
+        "objects": [
+          "potato",
+          "long potato",
+          "light color long potato",
+          "long pitted potato",
+          "light color long pitted potato",
+          "light color pitted potato",
+          "light color potato",
+          "pitted potato"
+        ],
+        "containers": [
+          "white box with Microsoft Logo",
+          "plastic box",
+          "box",
+          "box with Microsoft Logo",
+          "white box"
+        ]
+      },
+      "frame_count": 250,
+      "action_dim": 8,
+      "state_sources": [
+        "joints",
+        "ee_pos",
+        "ee_quat"
+      ],
+      "rgb_sources": [
+        "opst_cam_rgb",
+        "side_cam_rgb",
+        "wrist_cam_rgb"
+      ],
+      "event_count": 16818767,
+      "event_start_s": 0.0803062730998259,
+      "event_end_s": 10.06984976629877,
+      "event_time_origin_s": 0.07999999821186066,
+      "algorithm": "lighting_suppressed_ego_motion_v2",
+      "schema_version": 2
+    }
+  ]
+}

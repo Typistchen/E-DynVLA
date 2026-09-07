@@ -93,6 +93,28 @@ class DynamicVLAConfig(PreTrainedConfig):
     self_attn_every_n_layers: int = 2
     # The action expert hidden size (wrt to the VLM)
     expert_width_multiplier: float = 0.75
+    # E-DynVLA sparse event-token branch. It is opt-in so existing DynamicVLA
+    # checkpoints and RGB-only experiments remain reproducible.
+    use_event_tokens: bool = False
+    static_event_key: str = "observation.events.static"
+    dynamic_event_key: str = "observation.events.dynamic"
+    future_event_key: str = "observation.events.future_activity"
+    event_history_bins: int = 8
+    event_hidden_size: int = 256
+    event_patch_size: int = 16
+    event_max_patches_per_bin: int = 8
+    event_num_layers: int = 2
+    event_num_heads: int = 8
+    event_min_patch_density: float = 1e-6
+    # Optional short-horizon Event-WAM auxiliary objective.
+    event_wam_enabled: bool = False
+    event_wam_hidden_size: int = 256
+    event_wam_num_layers: int = 4
+    event_wam_num_heads: int = 8
+    event_wam_future_steps: int = 10
+    event_wam_grid_size: tuple[int, int] = (12, 16)
+    event_wam_loss_weight: float = 0.1
+    event_wam_positive_weight: float = 4.0
     # sensitivity range for the timestep used in sine-cosine positional encoding
     min_period: float = 4e-3
     max_period: float = 4.0
@@ -112,6 +134,8 @@ class DynamicVLAConfig(PreTrainedConfig):
                 "`use_delta_joint_actions_aloha` is used by dynamicvla for aloha real"
                 " models. It is not ported yet in LeRobot."
             )
+        if self.event_wam_enabled and not self.use_event_tokens:
+            raise ValueError("event_wam_enabled requires use_event_tokens=True")
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):

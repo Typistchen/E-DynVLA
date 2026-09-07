@@ -8,6 +8,7 @@
 # @Email:  root@haozhexie.com
 
 import logging
+import os
 import pathlib
 import typing
 
@@ -26,6 +27,7 @@ import torchvision.transforms.v2.functional as F
 
 import utils.memcached
 from utils.instruction_generator import InstructionGenerator
+from policies.edynvla.data import DOMEventDataset, EventWindowConfig
 
 
 def get_dataset(
@@ -36,7 +38,35 @@ def get_dataset(
     required_features: list[str] | None = None,
     image_transforms: typing.Callable | None = None,
     delta_timestamps: dict[str, list[float]] | None = None,
+    event_manifest: str | pathlib.Path | None = None,
+    event_root: str | pathlib.Path | None = None,
+    event_history_bins: int = 8,
+    event_bin_ms: float = 10.0,
+    event_output_size: tuple[int, int] = (96, 128),
+    action_horizon: int = 20,
+    rotation_format: str = "euler",
 ) -> torch.utils.data.Dataset:
+    if event_manifest is not None:
+        root = event_root or os.getenv("EDYNVLA_DATA_ROOT")
+        if not root:
+            raise ValueError(
+                "E-DynVLA DOM/event mode requires DATASET.EVENT_ROOT or "
+                "EDYNVLA_DATA_ROOT"
+            )
+        return DOMEventDataset(
+            event_manifest,
+            dataset_root=os.path.expandvars(str(root)),
+            event_config=EventWindowConfig(
+                history_bins=event_history_bins,
+                bin_ms=event_bin_ms,
+                output_size=tuple(event_output_size),
+            ),
+            split=split,
+            delta_action=delta_action,
+            image_transforms=image_transforms,
+            action_horizon=action_horizon,
+            rotation_format=rotation_format,
+        )
     return LeRobotDataset(
         dataset_name,
         split=split,

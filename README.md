@@ -1,44 +1,58 @@
-# V2E_VLA
+# E-DynVLA
 
-Event-camera simulation for DynamicVLA, combining the EVIS Isaac Sim plugin
-with the DOM/DynamicVLA simulation pipeline.
+E-DynVLA combines DOM robot-manipulation episodes with v4-hybrid event-camera
+simulation, lighting-suppressed ego-motion separation, sparse static/dynamic
+event tokens, DynamicVLA action prediction, and an optional Event-WAM
+short-horizon prediction objective.
+
+The repository starts from a clean, squashed source snapshot so its GitHub
+contributor graph reflects development in this repository. The upstream
+licenses and attribution remain in the corresponding source directories.
+
+## New event-token path
+
+- Architecture: [`dynamic-vla/docs/edynvla_architecture.md`](dynamic-vla/docs/edynvla_architecture.md)
+- Training preset: [`dynamic-vla/configs/edynvla.yaml`](dynamic-vla/configs/edynvla.yaml)
+- Event tokenizer: [`dynamic-vla/policies/edynvla/event_tokenizer.py`](dynamic-vla/policies/edynvla/event_tokenizer.py)
+- Event-WAM head: [`dynamic-vla/policies/edynvla/event_wam.py`](dynamic-vla/policies/edynvla/event_wam.py)
+- DOM/event adapter: [`dynamic-vla/policies/edynvla/data.py`](dynamic-vla/policies/edynvla/data.py)
 
 ## Repository layout
 
 - `isaac-sim-event-camera-plugin/`: EVIS event generation, multi-threshold
-  event model, noise/refractory handling, HDF5 recording, and visualization.
-- `dynamic-vla/`: DynamicVLA DOM simulation integration and usage docs.
+  v4-hybrid event model, confidence, HDF5 recording, motion separation, and
+  evaluation tools.
+- `dynamic-vla/`: DOM simulation, DynamicVLA policy, paired DOM/event loader,
+  sparse event tokenizer, and Event-WAM head.
+- `benchmark/`: controlled EVIS results and reproducible dataset manifests.
 
-Both directories retain their original Git histories through subtree imports.
-Generated datasets and videos are intentionally not tracked.
+Generated datasets and videos are intentionally not tracked. Set
+`EDYNVLA_DATA_ROOT` to the external paired DOM/event dataset directory before
+using `dynamic-vla/configs/edynvla.yaml`.
 
-## Current checkpoints
+## Provenance
 
-- EVIS core multi-threshold event model: `a6eec8b`
-- EVIS Isaac/H.264 compatibility: `50a1a7c`
-- EVIS event-video tooling: `3967743`
-- DynamicVLA EVIS integration: `df4526b`
-- EVIS photometric/occlusion-aware warp fix: `8ac5418`
-- Balanced dynamic-object-preserving warp mask: `e90175b`
-- Seed-2 halo evaluation report: `3161a4f`
-- DynamicVLA no-warp control support: `9dbea01`
-- EVIS per-event soft confidence: `3e2b183`
-- EVIS adaptive temporal knots: `ea838c5`
-- Dynamic-target confidence calibration: `a09977d`
-- DynamicVLA v3 runtime controls: `50eb6bd`
+This project builds on DynamicVLA and the JHU Isaac Sim event-camera plugin.
+Their licenses and author attribution are preserved inside the corresponding
+directories. Git history is intentionally squashed at import so the GitHub
+contributor graph records contributions made specifically in E-DynVLA.
 
-The `demo2` halo fix and its no-warp control are included. The initial
-`8ac5418` mask is retained for comparison but deprecated because it can erase
-the manipulated object; use the balanced `e90175b` checkpoint. See
-`isaac-sim-event-camera-plugin/docs/photometric_warp_fix.md` for measured event
-counts, temporal-burst metrics, limitations, and the next VLA evaluation step.
+See `dynamic-vla/docs/event_camera.md` for event generation commands and
+`dynamic-vla/docs/edynvla_architecture.md` for the new model/data contract.
 
-The experimental `feat/continuous-events-v3` history is also imported. It adds
-adaptive `K=4..8` temporal sampling and an HDF5 `q` confidence dataset while
-keeping all visible dynamic-object events. The seed-2 cup remains intact, but
-v3 is not promoted over balanced v2 yet because its raw 10 ms phase-imbalance
-metric is slightly worse on this episode. Fixed-K balanced v2 therefore remains
-the default; pass `--event_adaptive_warp` to opt into v3. Do not hard-threshold
-`q` in a VLA loader.
+## Quick start for the paired ten-demo set
 
-See `dynamic-vla/docs/event_camera.md` for setup and generation commands.
+```bash
+export EDYNVLA_DATA_ROOT=/path/to/motion_separation_10
+
+python dynamic-vla/scripts/build_edynvla_manifest.py \
+  --root "$EDYNVLA_DATA_ROOT" \
+  --output benchmark/manifests/dom_event_10demo.json
+
+cd dynamic-vla
+python run.py --cfg configs/edynvla.yaml --gpus 0
+```
+
+The ten demos validate data alignment and model wiring. They are not treated as
+sufficient data to train the Small VLM from scratch; the intended training set
+is the full DOM corpus with matching eventized episodes.

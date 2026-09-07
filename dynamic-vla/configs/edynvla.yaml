@@ -1,0 +1,94 @@
+# E-DynVLA: DOM RGB/state/language + separated event tokens + Event-WAM.
+CONST:
+  EXP_NAME: edynvla_event_tokens
+  N_WORKERS: 8
+
+DATASET:
+  NAME: hzxie/dynamic-objects
+  # Raw DOM and eventized DOM files are aligned through the manifest generated
+  # by scripts/build_edynvla_manifest.py. Segmentation/object_vel are metrics
+  # only and are never listed as model features.
+  EVENT_MANIFEST: ../benchmark/manifests/dom_event_10demo.json
+  # Set this in the shell instead of committing a machine-specific path:
+  # export EDYNVLA_DATA_ROOT=/path/to/motion_separation_10
+  EVENT_ROOT:
+  EVENT_BIN_MS: 10.0
+  EVENT_OUTPUT_SIZE: [96, 128]
+  ROTATION_FORMAT: euler
+  PIN_MEMORY: false
+  USE_DELTA_ACTION: true
+  IMG_SIZE:
+  DELTA_TIMESTAMPS:
+    observation: [-2, 0]
+  REQUIRED_FEATURES:
+    - observation.images.opst_cam
+    - observation.images.wrist_cam
+    - observation.state
+    - action
+
+POLICY:
+  TYPE: dynamicvla
+  CHECKPOINT:
+  N_OBS_STEPS: 2
+  CHUNK_SIZE: 20
+  N_ACTION_STEPS: 20
+  RESIZE_IMGS_WITH_PADDING: [384, 384]
+  ATTENTION_MODE: cross_attn
+  VLM_MODEL_NAME: HuggingFaceTB/SmolLM2-360M
+  NUM_VLM_LAYERS: 16
+  NUM_EXPERT_SKIP_LAYERS: 0
+  TEMPORAL_FUSION: attn
+  FREEZE_VISION_MODEL: true
+  FREEZE_CONNECTOR: true
+  FREEZE_TEXT_MODEL: true
+
+  USE_EVENT_TOKENS: true
+  EVENT_HISTORY_BINS: 8
+  EVENT_HIDDEN_SIZE: 256
+  EVENT_PATCH_SIZE: 16
+  EVENT_MAX_PATCHES_PER_BIN: 8
+  EVENT_NUM_LAYERS: 2
+  EVENT_NUM_HEADS: 8
+  EVENT_MIN_PATCH_DENSITY: 1.0e-6
+
+  EVENT_WAM_ENABLED: true
+  EVENT_WAM_HIDDEN_SIZE: 256
+  EVENT_WAM_NUM_LAYERS: 4
+  EVENT_WAM_NUM_HEADS: 8
+  EVENT_WAM_FUTURE_STEPS: 10
+  EVENT_WAM_GRID_SIZE: [12, 16]
+  EVENT_WAM_LOSS_WEIGHT: 0.1
+  EVENT_WAM_POSITIVE_WEIGHT: 4.0
+
+DIR:
+  OUTPUT: ./runs
+
+WANDB:
+  ENABLED: false
+  PROJECT: E-DynVLA
+  ENTITY: jq_chen924
+  MODE: online
+  RUN_ID: null
+  LOG_CODE: true
+  SYNC_TENSORBOARD: false
+
+TRAIN:
+  N_EPOCHS: 500
+  BATCH_SIZE: 16
+  GRAD_ACCUM_STEPS: 2
+  CKPT_SAVE_FREQ:
+    EPOCH: 5
+    BATCH: 0
+  OPTIMIZER:
+    LR: 1.0e-4
+    EPS: 1.0e-8
+    WEIGHT_DECAY: 1.0e-10
+    BETAS: [0.9, 0.95]
+  LR_SCHEDULER:
+    NAME: cosine
+    N_WARMUP_STEPS: 1000
+  IMAGE_TRANSFORMS:
+    BRIGHTNESS: [0.8, 1.2]
+    CONTRAST: [0.8, 1.2]
+    SATURATION: [0.5, 1.5]
+    HUE: [-0.05, 0.05]

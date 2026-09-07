@@ -171,7 +171,10 @@ def get_policy(
     img_size: tuple[int, int] | None = None,
     required_features: list[str] | None = None,
 ) -> PreTrainedPolicy:
-    features = dataset_to_policy_features(dataset_metadata.features)
+    if hasattr(dataset_metadata, "policy_features"):
+        features = get_policy_features(dataset_metadata.policy_features)
+    else:
+        features = dataset_to_policy_features(dataset_metadata.features)
     output_features = {
         key: ft
         for key, ft in features.items()

@@ -32,6 +32,8 @@ from policies.dynamicvla.modeling_fastvlm import (
     FastVLMForConditionalGeneration,
 )
 from policies.dynamicvla.modeling_vlm_with_expert import VLMWithExpertModel
+from policies.edynvla.event_tokenizer import EventTokenBatch, SparseEventTokenizer
+from policies.edynvla.event_wam import EventWAMHead, event_wam_loss
 
 # Matches ".soNNN", optionally followed by "-something", up to the "_buffer_" marker
 _VARIANT_RE = re.compile(r"\.so\d+(?:-[\w]+)?_buffer_")
@@ -121,7 +123,8 @@ def load_dynamicvla(
     state_dict = {k: v for k, v in state_dict.items() if not k.startswith(norm_keys)}
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if not all(key.startswith(norm_keys) for key in missing) or unexpected:
+    optional_new_keys = ("model.event_tokenizer.", "model.event_wam_head.")
+    if not all(key.startswith(norm_keys + optional_new_keys) for key in missing) or unexpected:
         raise RuntimeError(
             "DynamicVLA %d missing / %d unexpected keys"
             % (len(missing), len(unexpected))
@@ -455,9 +458,16 @@ class DynamicVLAPolicy(PreTrainedPolicy):
         images, img_masks = self.prepare_images(batch)
         state = self.prepare_state(batch)
         lang_tokens, lang_masks = self.prepare_language(batch)
+        event_batch = self.model.encode_events(self.prepare_events(batch))
 
         actions = self.model.sample_actions(
-            images, img_masks, lang_tokens, lang_masks, state, noise=noise
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=noise,
+            event_batch=event_batch,
         )
 
         # Unpad actions
@@ -484,7 +494,18 @@ class DynamicVLAPolicy(PreTrainedPolicy):
         if self.config.adapt_to_pi_aloha:
             batch[OBS_STATE] = self._pi_aloha_decode_state(batch[OBS_STATE])
 
-        return self.normalize_inputs(batch)
+        event_values = {
+            key: batch[key]
+            for key in (
+                self.config.static_event_key,
+                self.config.dynamic_event_key,
+                self.config.future_event_key,
+            )
+            if key in batch
+        }
+        batch = self.normalize_inputs(batch)
+        batch.update(event_values)
+        return batch
 
     @torch.no_grad()
     def predict_action_chunk(
@@ -599,17 +620,36 @@ class DynamicVLAPolicy(PreTrainedPolicy):
             batch[OBS_STATE] = self._pi_aloha_decode_state(batch[OBS_STATE])
             batch[ACTION] = self._pi_aloha_encode_actions_inv(batch[ACTION])
 
+        event_values = {
+            key: batch[key]
+            for key in (
+                self.config.static_event_key,
+                self.config.dynamic_event_key,
+                self.config.future_event_key,
+            )
+            if key in batch
+        }
         batch = self.normalize_inputs(batch)
+        batch.update(event_values)
         batch = self.normalize_targets(batch)
         images, img_masks = self.prepare_images(batch)
         state = self.prepare_state(batch)
         lang_tokens, lang_masks = self.prepare_language(batch)
+        event_batch = self.model.encode_events(self.prepare_events(batch))
 
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
         losses = self.model.forward(
-            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            actions,
+            noise,
+            time,
+            event_batch=event_batch,
         )
         loss_dict["losses_after_forward"] = losses.clone()
         if actions_is_pad is not None:
@@ -623,6 +663,21 @@ class DynamicVLAPolicy(PreTrainedPolicy):
 
         # For backward pass
         loss = losses.mean()
+        if self.config.event_wam_enabled:
+            if self.config.future_event_key not in batch:
+                raise KeyError(
+                    f"missing Event-WAM target: {self.config.future_event_key}"
+                )
+            future_logits = self.model.predict_future_events(
+                event_batch, state, action_context=actions.detach()
+            )
+            wam_loss = event_wam_loss(
+                future_logits,
+                batch[self.config.future_event_key],
+                positive_weight=self.config.event_wam_positive_weight,
+            )
+            loss = loss + self.config.event_wam_loss_weight * wam_loss
+            loss_dict["event_wam_loss"] = wam_loss.item()
         # For backward pass
         loss_dict["loss"] = loss.item()
         return loss, loss_dict
@@ -747,6 +802,30 @@ class DynamicVLAPolicy(PreTrainedPolicy):
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
         return actions
 
+    def prepare_events(
+        self, batch: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Return confidence-weighted static/dynamic event voxel histories."""
+        if not self.config.use_event_tokens:
+            return None
+        missing = [
+            key
+            for key in (self.config.static_event_key, self.config.dynamic_event_key)
+            if key not in batch
+        ]
+        if missing:
+            raise KeyError(f"missing E-DynVLA event inputs: {missing}")
+        static = batch[self.config.static_event_key].float()
+        dynamic = batch[self.config.dynamic_event_key].float()
+        if static.ndim == 5:
+            return static, dynamic
+        if static.ndim == 6 and static.shape[1] == 1:
+            return static[:, 0], dynamic[:, 0]
+        raise ValueError(
+            "event inputs must have shape [B,T,2,H,W] "
+            f"(received {tuple(static.shape)})"
+        )
+
 
 def pad_tensor(tensor, max_len, pad_value=0):
     """
@@ -833,7 +912,56 @@ class VLAFlowMatching(torch.nn.Module):
             self.vlm_with_expert.expert_hidden_size,
             self.vlm_with_expert.expert_hidden_size,
         )
+        vlm_hidden_size = self.vlm_with_expert.vlm_config.text_config.hidden_size
+        self.event_tokenizer = None
+        self.event_wam_head = None
+        if config.use_event_tokens:
+            self.event_tokenizer = SparseEventTokenizer(
+                hidden_dim=config.event_hidden_size,
+                output_dim=vlm_hidden_size,
+                patch_size=config.event_patch_size,
+                max_patches_per_bin=config.event_max_patches_per_bin,
+                history_bins=config.event_history_bins,
+                num_layers=config.event_num_layers,
+                num_heads=config.event_num_heads,
+                min_patch_density=config.event_min_patch_density,
+            )
+        if config.event_wam_enabled:
+            self.event_wam_head = EventWAMHead(
+                token_dim=vlm_hidden_size,
+                hidden_dim=config.event_wam_hidden_size,
+                state_dim=config.max_state_dim,
+                action_dim=config.max_action_dim,
+                future_steps=config.event_wam_future_steps,
+                grid_size=config.event_wam_grid_size,
+                num_layers=config.event_wam_num_layers,
+                num_heads=config.event_wam_num_heads,
+            )
         self._set_requires_grad()
+
+    def encode_events(
+        self, events: tuple[torch.Tensor, torch.Tensor] | None
+    ) -> EventTokenBatch | None:
+        if events is None:
+            return None
+        if self.event_tokenizer is None:
+            raise RuntimeError("received event inputs while event tokenization is disabled")
+        return self.event_tokenizer(*events)
+
+    def predict_future_events(
+        self,
+        event_batch: EventTokenBatch | None,
+        state: torch.Tensor,
+        action_context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.event_wam_head is None or event_batch is None:
+            raise RuntimeError("Event-WAM is disabled or event tokens are missing")
+        return self.event_wam_head(
+            event_batch.tokens,
+            event_batch.mask,
+            state,
+            action_history=action_context,
+        )
 
     def _get_vlm_with_expert(
         self,
@@ -929,7 +1057,13 @@ class VLAFlowMatching(torch.nn.Module):
         return time
 
     def _embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks, state: torch.Tensor = None
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state: torch.Tensor = None,
+        event_batch: EventTokenBatch | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         embs = []
         pad_masks = []
@@ -958,6 +1092,14 @@ class VLAFlowMatching(torch.nn.Module):
             embs.append(img_emb)
             pad_masks.append(img_mask)
             att_masks += [0] * (num_img_embs)
+
+        if event_batch is not None:
+            event_emb = event_batch.tokens
+            event_emb_dim = event_emb.shape[-1]
+            event_emb = event_emb * math.sqrt(event_emb_dim)
+            embs.append(event_emb)
+            pad_masks.append(event_batch.mask)
+            att_masks += [0] * event_emb.shape[1]
 
         lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens)
         # Normalize language embeddings
@@ -1061,6 +1203,7 @@ class VLAFlowMatching(torch.nn.Module):
         actions,
         noise=None,
         time=None,
+        event_batch: EventTokenBatch | None = None,
     ) -> torch.Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
@@ -1073,7 +1216,12 @@ class VLAFlowMatching(torch.nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
         prefix_embs, prefix_pad_masks, prefix_att_masks = self._embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state=state,
+            event_batch=event_batch,
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks = self._embed_suffix(x_t, time)
 
@@ -1098,12 +1246,23 @@ class VLAFlowMatching(torch.nn.Module):
         return losses
 
     def sample_vlm_embedding(
-        self, images, img_masks, lang_tokens, lang_masks, state
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        event_batch: EventTokenBatch | None = None,
     ) -> torch.Tensor:
         """Do a half inference forward and compute the VLM embedding"""
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self._embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            event_batch=event_batch,
         )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = self._get_position_ids(None, prefix_pad_masks)
@@ -1119,7 +1278,14 @@ class VLAFlowMatching(torch.nn.Module):
         return prefix_pad_masks, past_key_values
 
     def sample_actions(
-        self, images, img_masks, lang_tokens, lang_masks, state, noise=None
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        noise=None,
+        event_batch: EventTokenBatch | None = None,
     ) -> torch.Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = state.shape[0]
@@ -1129,7 +1295,12 @@ class VLAFlowMatching(torch.nn.Module):
             noise = self._sample_noise(actions_shape, device)
 
         prefix_pad_masks, past_key_values = self.sample_vlm_embedding(
-            images, img_masks, lang_tokens, lang_masks, state
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            event_batch=event_batch,
         )
         dt = -1.0 / self.config.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)

@@ -30,6 +30,13 @@ def test(cfg, test_data_loader=None, policy=None):
             delta_timestamps=utils.helpers.get_delta_timestamps(
                 cfg.POLICY, cfg.DATASET.DELTA_TIMESTAMPS
             ),
+            event_manifest=cfg.DATASET.get("EVENT_MANIFEST"),
+            event_root=cfg.DATASET.get("EVENT_ROOT"),
+            event_history_bins=cfg.POLICY.get("EVENT_HISTORY_BINS", 8),
+            event_bin_ms=cfg.DATASET.get("EVENT_BIN_MS", 10.0),
+            event_output_size=cfg.DATASET.get("EVENT_OUTPUT_SIZE", (96, 128)),
+            action_horizon=cfg.POLICY.get("CHUNK_SIZE", 20),
+            rotation_format=cfg.DATASET.get("ROTATION_FORMAT", "euler"),
         )
         test_data_loader = torch.utils.data.DataLoader(
             dataset=test_dataset,
