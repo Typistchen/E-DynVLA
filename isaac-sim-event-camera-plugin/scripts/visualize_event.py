@@ -1,0 +1,93 @@
+"""
+visualize_event.py
+==================
+Render the DVS events saved by simulate_warp.py into a stereo
+side-by-side video. Events are binned into frames at --fps; each frame shows the
+events in the --interval_ms window starting at its timestamp (red = ON, blue = OFF).
+
+  python ./scripts/visualize_event.py --dir /tmp/multi_cam_dvs --env 0 --eps 0 \
+         --fps 50 --interval_ms 5
+"""
+import argparse
+import os
+
+import cv2
+import h5py
+import numpy as np
+
+from dvs_gen.io import H264Writer
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--dir", type=str, default="/tmp/multi_cam_dvs")
+parser.add_argument("--env", type=int, default=0)
+parser.add_argument("--eps", type=int, default=0)
+parser.add_argument("--fps", type=int, default=50, help="output video frame rate")
+parser.add_argument("--interval_ms", type=float, default=5.0, help="time window of events drawn per frame")
+parser.add_argument("--height", type=int, default=480)
+parser.add_argument("--width", type=int, default=640)
+parser.add_argument("--out", type=str, default=None)
+parser.add_argument(
+    "--cams",
+    type=str,
+    default=None,
+    help="Comma-separated camera names; default: all cameras under /DVS.",
+)
+args = parser.parse_args()
+
+H, W = args.height, args.width
+
+
+def load_cam(f, cam):
+    # keep native dtypes (x,y uint16; p int8) — upcasting 100M+ events to int64 for
+    # both cameras exhausts RAM and silently corrupts the load (NaN/garbage t).
+    g = f[f"DVS/{cam}"]
+    return (g["x"][:], g["y"][:], g["t"][:], g["p"][:])
+
+
+def frame_at(ev, t0, t1):
+    """white canvas with events in [t0, t1): red = ON (p>0), blue = OFF."""
+    x, y, t, p = ev
+    img = np.full((H, W, 3), 255, np.uint8)
+    # Recorder output is timestamp sorted.  Binary-searching the two window
+    # boundaries avoids scanning the complete event stream for every frame.
+    lo = np.searchsorted(t, t0, side="left")
+    hi = np.searchsorted(t, t1, side="left")
+    xi, yi, pi = x[lo:hi], y[lo:hi], p[lo:hi]
+    keep = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
+    xi, yi, pi = xi[keep], yi[keep], pi[keep]
+    on, off = pi > 0, pi <= 0
+    img[yi[on], xi[on]] = (255, 0, 0)        # ON  -> red   (RGB)
+    img[yi[off], xi[off]] = (0, 0, 255)      # OFF -> blue
+    return img
+
+
+def main():
+    h5_path = os.path.join(args.dir, f"env{args.env}_ep{args.eps}.h5")
+    with h5py.File(h5_path, "r") as f:
+        cams = (
+            [c.strip() for c in args.cams.split(",") if c.strip()]
+            if args.cams
+            else sorted(f["DVS"].keys())
+        )
+        missing = [c for c in cams if f"DVS/{c}" not in f]
+        if missing:
+            raise KeyError(f"Cameras not found in {h5_path}: {missing}")
+        evs = {c: load_cam(f, c) for c in cams}
+
+    tmin = min(ev[2].min() for ev in evs.values())
+    tmax = max(ev[2].max() for ev in evs.values())
+    win = args.interval_ms * 1e-3
+    times = np.arange(tmin, tmax, 1.0 / args.fps)
+
+    out_path = args.out or os.path.join(args.dir, f"vis_event_env{args.env}_ep{args.eps}.mp4")
+    vw = H264Writer(out_path, W * len(cams), H, args.fps)
+    for tc in times:
+        panes = [frame_at(evs[c], tc, tc + win) for c in cams]
+        vw.write(cv2.cvtColor(np.concatenate(panes, axis=1), cv2.COLOR_RGB2BGR))
+    vw.release()
+    n = sum(len(ev[0]) for ev in evs.values())
+    print(f"[visualize_event] {n} events, {len(times)} frames -> {out_path}", flush=True)
+
+
+if __name__ == "__main__":
+    main()
