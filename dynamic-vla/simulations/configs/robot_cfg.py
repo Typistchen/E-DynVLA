@@ -22,7 +22,6 @@ from isaaclab_tasks.manager_based.manipulation.lift import mdp
 ##
 from isaaclab.markers.config import FRAME_MARKER_CFG  # isort: skip
 from robots.franka import FRANKA_PANDA_HIGH_PD_CFG  # isort: skip
-from robots.piper import AGILEX_PIPER_HIGH_PD_CFG  # isort: skip
 
 
 @configclass
@@ -81,8 +80,6 @@ class PiperActionCfg(ActionCfg):
 def get_body_name(robot: str) -> str:
     if robot == "franka":
         return "panda_hand"
-    elif robot == "piper":
-        return "gripper_base"
     else:
         raise ValueError("Unknown robot: %s" % robot)
 
@@ -90,8 +87,6 @@ def get_body_name(robot: str) -> str:
 def get_robot_cfg(robot: str) -> ArticulationCfg:
     if robot == "franka":
         cfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-    elif robot == "piper":
-        cfg = AGILEX_PIPER_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     else:
         raise ValueError("Unknown robot: %s" % robot)
 
@@ -102,8 +97,6 @@ def get_robot_cfg(robot: str) -> ArticulationCfg:
 def get_robot_action_cfg(robot: str) -> ActionCfg:
     if robot == "franka":
         return FrankaActionCfg()
-    elif robot == "piper":
-        return PiperActionCfg()
     else:
         raise ValueError("Unknown robot: %s" % robot)
 
@@ -126,19 +119,6 @@ def get_ee_frame_cfg(robot: str) -> FrameTransformerCfg:
                 ),
             ],
         )
-    elif robot == "piper":
-        return FrameTransformerCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/base_link",
-            debug_vis=False,
-            visualizer_cfg=marker_cfg,
-            target_frames=[
-                FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/gripper_base",
-                    name="end_effector",
-                    offset=OffsetCfg(pos=[0.0, 0.0, 0.1334]),
-                ),
-            ],
-        )
     else:
         raise ValueError("Unknown robot: %s" % robot)
 
@@ -146,8 +126,6 @@ def get_ee_frame_cfg(robot: str) -> FrameTransformerCfg:
 def get_wrist_camera_cfg(robot: str) -> dict:
     if robot == "franka":
         prim_path = "/Robot/panda_hand/WristCamera"
-    elif robot == "piper":
-        prim_path = "/Robot/gripper_base/WristCamera"
     else:
         raise ValueError("Unknown robot: %s" % robot)
 
@@ -162,7 +140,5 @@ def get_wrist_camera_cfg(robot: str) -> dict:
 def get_robot_name(usd_path: str) -> str:
     if usd_path.endswith("panda_instanceable.usd"):
         return "franka"
-    elif usd_path.endswith("piper.usd"):
-        return "piper"
     else:
         raise ValueError("Unknown robot name: %s" % usd_path)

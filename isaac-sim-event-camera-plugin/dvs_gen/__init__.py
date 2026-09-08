@@ -11,7 +11,7 @@ Pure core (importable without Isaac Sim)::
 Isaac-side helpers (require the Isaac Lab Python environment); imported lazily so
 that the line above keeps working outside Isaac::
 
-    from dvs_gen import DVSCamera, DVSCameraCfg, DVSEnvCfg
+    from dvs_gen import DVSCamera, DVSCameraCfg
 """
 # Pure (Omniverse-free) — safe to import anywhere.
 from .dvs import GeneralDVSRecorder, BatchedMultiCamProcessor
@@ -23,7 +23,6 @@ __all__ = [
     "bidir_warp_gap",
     "DVSCamera",
     "DVSCameraCfg",
-    "DVSEnvCfg",
 ]
 
 # Isaac-dependent symbols are resolved lazily (PEP 562) so that importing the
@@ -31,7 +30,6 @@ __all__ = [
 _LAZY = {
     "DVSCamera":    ("dvs_gen.sensors", "DVSCamera"),
     "DVSCameraCfg": ("dvs_gen.sensors", "DVSCameraCfg"),
-    "DVSEnvCfg":    ("dvs_gen.env",     "DVSEnvCfg"),
 }
 
 
