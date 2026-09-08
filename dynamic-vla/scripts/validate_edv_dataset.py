@@ -142,9 +142,13 @@ def main() -> None:
             {
                 "sample_index": sample_index,
                 "frame_count": frame_count,
-                "source_episode_index": reproduction["source_csv"][
-                    "source_episode_index"
-                ],
+                "source_episode_index": (
+                    reproduction["source_csv"]["source_episode_index"]
+                    if reproduction.get("source_csv") is not None
+                    else None
+                ),
+                "simulation_seed": reproduction["simulation_seed"],
+                "outcome": reproduction.get("outcome"),
                 "videos": videos,
                 "events": events,
                 "size_bytes": size_bytes,

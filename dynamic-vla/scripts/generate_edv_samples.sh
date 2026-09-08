@@ -15,11 +15,9 @@ PYTHON_BIN="$SCRATCH_ROOT/environment/isaaclab45_dom/bin/python"
 DOM_ROOT="$SCRATCH_ROOT/code/E-DynVLA/dynamic-vla"
 EVENT_ROOT="$SCRATCH_ROOT/code/raw_event_generator"
 ASSET_ROOT="$SCRATCH_ROOT/dataset/dom_assets"
-CSV_PATH="$SCRATCH_ROOT/dataset/pick_initial_conditions.csv"
 DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
-GENERATOR_REVISION=edv-v3-aedat4
-RANDOM_SAFE=${EDV_RANDOM_SAFE:-0}
-FIXED_OBJECT_ASSET=${EDV_FIXED_OBJECT_ASSET:-apple01.usd}
+GENERATOR_REVISION=edv-v4-dom-stratified-aedat4
+SAMPLER=${EDV_SAMPLER:-dom_stratified}
 SEED_BASE=${EDV_SEED_BASE:-42}
 
 export XDG_CACHE_HOME="$SCRATCH_ROOT/environment/cache"
@@ -50,19 +48,20 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
   }
   trap cleanup_staging EXIT
 
-  echo "[EDV] generating CSV row $row -> $sample_name on $DEVICE"
-  random_args=()
-  if [[ "$RANDOM_SAFE" == "1" ]]; then
-    random_args=(
-      --random-safe-init
-      --fixed-object-asset "$FIXED_OBJECT_ASSET"
+  echo "[EDV] generating sample index $row -> $sample_name on $DEVICE"
+  sampler_args=()
+  if [[ "$SAMPLER" == "dom_stratified" ]]; then
+    sampler_args=(
+      --random-dom-init
+      --sample-index "$row"
       --seed "$((SEED_BASE + row))"
     )
+  else
+    echo "Unsupported EDV_SAMPLER: $SAMPLER" >&2
+    exit 4
   fi
   "$PYTHON_BIN" -u "$DOM_ROOT/scripts/run_pick_csv_event_demo.py" \
     --dynamic-vla-root "$DOM_ROOT" \
-    --csv "$CSV_PATH" \
-    --row "$row" \
     --scene-dir "$ASSET_ROOT/scenes" \
     --object-dir "$ASSET_ROOT/objects" \
     --output-dir "$staging_root" \
@@ -70,13 +69,11 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
     --event-source hdr \
     --event-threshold 0.15 \
     --event-warp 4 \
-    "${random_args[@]}"
+    "${sampler_args[@]}"
 
   "$PYTHON_BIN" -u "$DOM_ROOT/scripts/package_edv_lerobot_sample.py" \
     --staging-dir "$staging_root" \
     --dataset-root "$DATASET_ROOT" \
-    --csv "$CSV_PATH" \
-    --row "$row" \
     --dynamic-vla-root "$DOM_ROOT" \
     --event-code-root "$EVENT_ROOT" \
     --asset-root "$ASSET_ROOT" \

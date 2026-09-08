@@ -35,8 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--staging-dir", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--csv", type=Path, required=True)
-    parser.add_argument("--row", type=int, required=True)
+    parser.add_argument("--csv", type=Path)
+    parser.add_argument("--row", type=int, default=0)
     parser.add_argument("--dynamic-vla-root", type=Path, required=True)
     parser.add_argument("--event-code-root", type=Path, required=True)
     parser.add_argument("--asset-root", type=Path, required=True)
@@ -231,13 +231,23 @@ def write_dataset_info(root: Path) -> None:
     for reproduction_path in sorted(root.glob("sample_*/reproduction.json")):
         with reproduction_path.open(encoding="utf-8") as stream:
             reproduction = json.load(stream)
+        source_csv = reproduction.get("source_csv")
         samples.append(
             {
                 "sample_index": reproduction["sample_index"],
-                "source_csv_row": reproduction["source_csv"]["zero_based_row"],
-                "source_episode_index": reproduction["source_csv"][
-                    "source_episode_index"
-                ],
+                "source_csv_row": (
+                    source_csv["zero_based_row"] if source_csv is not None else None
+                ),
+                "source_episode_index": (
+                    source_csv["source_episode_index"]
+                    if source_csv is not None
+                    else None
+                ),
+                "simulation_seed": reproduction["simulation_seed"],
+                "success": reproduction.get("outcome", {}).get("success"),
+                "termination_reason": reproduction.get("outcome", {}).get(
+                    "termination_reason"
+                ),
                 "frame_count": reproduction["frame_count"],
                 "event_counts": {
                     camera: reproduction["events"][camera]["event_count"]
@@ -311,8 +321,12 @@ def main() -> None:
                 "seed": None,
             }
         )
-        csv_row = read_csv_row(args.csv, args.row)
-        source_episode_index = int(csv_row["episode_index"])
+        csv_row = read_csv_row(args.csv, args.row) if args.csv is not None else None
+        source_episode_index = (
+            int(csv_row["episode_index"])
+            if csv_row is not None
+            else int(generation_manifest["seed"])
+        )
 
         with source_json.open(encoding="utf-8") as stream:
             simulation_config = json.load(stream)
@@ -359,6 +373,38 @@ def main() -> None:
                 axis=1,
             ).astype(np.float32)
             rgb_frames = {camera: source[f"{camera}_rgb"][:] for camera in CAMERAS}
+
+        close_indices = np.flatnonzero(actions[:, -1] < 0)
+        ee_object_distance = np.linalg.norm(
+            state[:, :3] - environment_state[:, :3], axis=1
+        )
+        initial_object_z = float(environment_state[0, 2])
+        final_object_z = float(environment_state[-1, 2])
+        max_object_z = float(environment_state[:, 2].max())
+        lift_height = max_object_z - initial_object_z
+        success = bool(len(close_indices) > 0 and lift_height >= 0.10)
+        if success:
+            termination_reason = "grasp_success"
+        elif final_object_z < initial_object_z - 0.05:
+            termination_reason = "object_fell"
+        elif len(close_indices) == 0:
+            termination_reason = "missed_object_or_timeout"
+        else:
+            termination_reason = "grasp_failed"
+        outcome = {
+            "success": success,
+            "termination_reason": termination_reason,
+            "label_method": "gripper_closed_and_object_lifted_at_least_0.10m",
+            "close_frame_count": int(len(close_indices)),
+            "first_close_frame": (
+                int(close_indices[0]) if len(close_indices) > 0 else None
+            ),
+            "minimum_ee_object_distance_m": float(ee_object_distance.min()),
+            "initial_object_z_m": initial_object_z,
+            "maximum_object_z_m": max_object_z,
+            "final_object_z_m": final_object_z,
+            "maximum_lift_m": lift_height,
+        }
 
         expected_timestamp = np.arange(frame_count, dtype=np.float64) / FPS
         if not np.allclose(timestamps_rel, expected_timestamp, atol=1e-6):
@@ -447,14 +493,15 @@ def main() -> None:
                 f"EDV_FIXED_OBJECT_ASSET={generation_manifest['fixed_object_asset']} "
                 f"EDV_SEED_BASE={generation_manifest['seed'] - args.row} "
             )
+        elif generation_manifest.get("initial_condition_source") == "dom_stratified_random":
+            reproduction_env = (
+                "EDV_SAMPLER=dom_stratified "
+                f"EDV_SEED_BASE={generation_manifest['seed'] - args.sample_index} "
+            )
 
-        reproduction = {
-            "schema_version": "edv-3.0",
-            "sample_index": args.sample_index,
-            "frame_count": frame_count,
-            "created_utc": datetime.now(timezone.utc).isoformat(),
-            "generator_revision": args.generator_revision,
-            "source_csv": {
+        source_csv = None
+        if csv_row is not None:
+            source_csv = {
                 "name": args.csv.name,
                 "sha256": sha256_file(args.csv),
                 "zero_based_row": args.row,
@@ -464,13 +511,27 @@ def main() -> None:
                 "pose_velocity_fields_used": (
                     generation_manifest.get("initial_condition_source") == "csv"
                 ),
+            }
+
+        reproduction = {
+            "schema_version": "edv-3.0",
+            "sample_index": args.sample_index,
+            "frame_count": frame_count,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "generator_revision": args.generator_revision,
+            "source_generation": {
+                "mode": generation_manifest.get("initial_condition_source"),
+                "sample_index": args.sample_index,
+                "uses_csv_initial_condition": csv_row is not None,
             },
+            "source_csv": source_csv,
             "simulation_seed": (
                 generation_manifest.get("seed")
                 if generation_manifest.get("seed") is not None
                 else source_episode_index
             ),
             "initial_condition": generation_manifest,
+            "outcome": outcome,
             "event_configuration": {
                 "mode": "v4_hybrid",
                 "source": args.event_source,
