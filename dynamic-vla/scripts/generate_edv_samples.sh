@@ -18,6 +18,9 @@ ASSET_ROOT="$SCRATCH_ROOT/dataset/dom_assets"
 CSV_PATH="$SCRATCH_ROOT/dataset/pick_initial_conditions.csv"
 DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
 GENERATOR_REVISION=edv-v3-aedat4
+RANDOM_SAFE=${EDV_RANDOM_SAFE:-0}
+FIXED_OBJECT_ASSET=${EDV_FIXED_OBJECT_ASSET:-apple01.usd}
+SEED_BASE=${EDV_SEED_BASE:-42}
 
 export XDG_CACHE_HOME="$SCRATCH_ROOT/environment/cache"
 export PIP_CACHE_DIR="$SCRATCH_ROOT/environment/cache/pip"
@@ -48,6 +51,14 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
   trap cleanup_staging EXIT
 
   echo "[EDV] generating CSV row $row -> $sample_name on $DEVICE"
+  random_args=()
+  if [[ "$RANDOM_SAFE" == "1" ]]; then
+    random_args=(
+      --random-safe-init
+      --fixed-object-asset "$FIXED_OBJECT_ASSET"
+      --seed "$((SEED_BASE + row))"
+    )
+  fi
   "$PYTHON_BIN" -u "$DOM_ROOT/scripts/run_pick_csv_event_demo.py" \
     --dynamic-vla-root "$DOM_ROOT" \
     --csv "$CSV_PATH" \
@@ -58,7 +69,8 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
     --device "$DEVICE" \
     --event-source hdr \
     --event-threshold 0.15 \
-    --event-warp 4
+    --event-warp 4 \
+    "${random_args[@]}"
 
   "$PYTHON_BIN" -u "$DOM_ROOT/scripts/package_edv_lerobot_sample.py" \
     --staging-dir "$staging_root" \

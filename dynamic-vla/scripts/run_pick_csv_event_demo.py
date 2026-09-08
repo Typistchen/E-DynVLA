@@ -8,6 +8,7 @@ import ast
 import csv
 import glob
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event-threshold", type=float, default=0.15)
     parser.add_argument("--event-warp", type=int, default=4)
     parser.add_argument("--event-source", choices=("hdr", "ldr"), default="hdr")
+    parser.add_argument(
+        "--random-safe-init",
+        action="store_true",
+        help="Ignore CSV pose/velocity fields and sample a reproducible safe initial state",
+    )
+    parser.add_argument(
+        "--fixed-object-asset",
+        help="Fixed USD filename (for example apple01.usd) used with random-safe init",
+    )
+    parser.add_argument("--random-speed-min", type=float, default=0.20)
+    parser.add_argument("--random-speed-max", type=float, default=0.35)
     return parser.parse_args()
 
 
@@ -67,8 +79,55 @@ def load_simulation_module(dynamic_vla_root: Path):
 def main() -> None:
     args = parse_args()
     row = read_row(args.csv, args.row)
-    category = infer_category(row, args.object_dir)
     seed = int(row["episode_index"]) if args.seed is None else args.seed
+
+    if args.fixed_object_asset:
+        matches = sorted(args.object_dir.rglob(args.fixed_object_asset))
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Expected one asset named {args.fixed_object_asset!r}, found {matches}"
+            )
+        fixed_object_file = matches[0]
+        category = fixed_object_file.parent.name
+    else:
+        fixed_object_file = None
+        category = infer_category(row, args.object_dir)
+
+    if args.random_safe_init:
+        if args.random_speed_min <= 0 or args.random_speed_max < args.random_speed_min:
+            raise ValueError("Invalid random speed range")
+        rng = np.random.default_rng(seed)
+        relative_position = np.array(
+            [rng.uniform(0.28, 0.42), rng.uniform(-0.16, 0.16), 0.04],
+            dtype=np.float64,
+        )
+        table_center = np.array([0.35, 0.0], dtype=np.float64)
+        center_angle = np.arctan2(
+            table_center[1] - relative_position[1],
+            table_center[0] - relative_position[0],
+        )
+        motion_angle = center_angle + rng.uniform(-np.pi / 8, np.pi / 8)
+        speed = rng.uniform(args.random_speed_min, args.random_speed_max)
+        relative_velocity = np.array(
+            [speed * np.cos(motion_angle), speed * np.sin(motion_angle), 0.0],
+            dtype=np.float64,
+        )
+        relative_rotation = Rotation.from_euler(
+            "xyz",
+            [rng.choice([np.pi / 2, 3 * np.pi / 2]), 0.0, rng.uniform(0, 2 * np.pi)],
+        )
+        initial_condition_source = "safe_random"
+    else:
+        relative_position = np.array(
+            [float(row[f"obj_pos_{axis}"]) for axis in "xyz"], dtype=np.float64
+        )
+        relative_velocity = np.array(
+            [float(row[f"obj_vel_{axis}"]) for axis in "xyz"], dtype=np.float64
+        )
+        relative_rotation = Rotation.from_euler(
+            "xyz", [float(row[f"obj_rot_{axis}"]) for axis in "xyz"]
+        )
+        initial_condition_source = "csv"
 
     # Omniverse must be launched before importing the DOM simulator.
     from isaaclab.app import AppLauncher
@@ -83,18 +142,13 @@ def main() -> None:
             raise FileNotFoundError(f"No USD objects found for category {category!r}")
 
         # The CSV does not expose the original USD variant. Select one
-        # deterministically while preserving the recorded category.
-        object_file = object_files[seed % len(object_files)]
+        # deterministically unless the caller fixes the object asset.
+        object_file = (
+            str(fixed_object_file)
+            if fixed_object_file is not None
+            else object_files[seed % len(object_files)]
+        )
         object_size = sim._get_object_sizes(str(args.object_dir), [category])[object_file]
-        relative_position = np.array(
-            [float(row[f"obj_pos_{axis}"]) for axis in "xyz"], dtype=np.float64
-        )
-        relative_velocity = np.array(
-            [float(row[f"obj_vel_{axis}"]) for axis in "xyz"], dtype=np.float64
-        )
-        relative_rotation = Rotation.from_euler(
-            "xyz", [float(row[f"obj_rot_{axis}"]) for axis in "xyz"]
-        )
         upstream_object_states = sim._get_object_states
 
         def fixed_object_states(
@@ -135,6 +189,24 @@ def main() -> None:
 
         sim._get_object_states = fixed_object_states
         args.output_dir.mkdir(parents=True, exist_ok=True)
+        generation_manifest = {
+            "initial_condition_source": initial_condition_source,
+            "seed": seed,
+            "fixed_object_asset": Path(object_file).name,
+            "object_category": category,
+            "relative_position_xyz": relative_position.tolist(),
+            "relative_rotation_xyz": relative_rotation.as_euler("xyz").tolist(),
+            "relative_velocity_xyz": relative_velocity.tolist(),
+            "random_speed_range": (
+                [args.random_speed_min, args.random_speed_max]
+                if args.random_safe_init
+                else None
+            ),
+        }
+        with (args.output_dir / "generation_manifest.json").open(
+            "w", encoding="utf-8"
+        ) as stream:
+            json.dump(generation_manifest, stream, ensure_ascii=False, indent=2)
         event_output_dir = args.output_dir / "events"
         event_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -178,8 +250,9 @@ def main() -> None:
                 "DOM returned without saving an episode; inspect the simulator log"
             )
         print(
-            f"[done] episode_index={row['episode_index']} category={category} "
-            f"asset={Path(object_file).name} output={args.output_dir}",
+            f"[done] source_episode_index={row['episode_index']} seed={seed} "
+            f"category={category} asset={Path(object_file).name} "
+            f"output={args.output_dir}",
             flush=True,
         )
     finally:

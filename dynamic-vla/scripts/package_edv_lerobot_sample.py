@@ -302,6 +302,15 @@ def main() -> None:
         source_event = require_one(
             (staging / "events").glob("env*_ep*.h5"), "event HDF5"
         )
+        generation_manifest_path = staging / "generation_manifest.json"
+        generation_manifest = (
+            json.loads(generation_manifest_path.read_text(encoding="utf-8"))
+            if generation_manifest_path.is_file()
+            else {
+                "initial_condition_source": "csv",
+                "seed": None,
+            }
+        )
         csv_row = read_csv_row(args.csv, args.row)
         source_episode_index = int(csv_row["episode_index"])
 
@@ -431,6 +440,14 @@ def main() -> None:
         for path in (*video_paths.values(), *event_paths.values()):
             files[path.relative_to(temp_sample).as_posix()] = sha256_file(path)
 
+        reproduction_env = ""
+        if generation_manifest.get("initial_condition_source") == "safe_random":
+            reproduction_env = (
+                "EDV_RANDOM_SAFE=1 "
+                f"EDV_FIXED_OBJECT_ASSET={generation_manifest['fixed_object_asset']} "
+                f"EDV_SEED_BASE={generation_manifest['seed'] - args.row} "
+            )
+
         reproduction = {
             "schema_version": "edv-3.0",
             "sample_index": args.sample_index,
@@ -444,8 +461,16 @@ def main() -> None:
                 "source_episode_index": source_episode_index,
                 "source_task_index": int(csv_row["task_index"]),
                 "row": csv_row,
+                "pose_velocity_fields_used": (
+                    generation_manifest.get("initial_condition_source") == "csv"
+                ),
             },
-            "simulation_seed": source_episode_index,
+            "simulation_seed": (
+                generation_manifest.get("seed")
+                if generation_manifest.get("seed") is not None
+                else source_episode_index
+            ),
+            "initial_condition": generation_manifest,
             "event_configuration": {
                 "mode": "v4_hybrid",
                 "source": args.event_source,
@@ -497,7 +522,8 @@ def main() -> None:
             },
             "file_sha256": files,
             "reproduction_command": (
-                f"bash dynamic-vla/scripts/generate_edv_samples.sh "
+                reproduction_env
+                + f"bash dynamic-vla/scripts/generate_edv_samples.sh "
                 f"{args.row} 1 {args.device}"
             ),
             "determinism_note": (
