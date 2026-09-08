@@ -563,7 +563,8 @@ class DVSCamera:
         for proc in self.procs:
             proc.reset_envs(env_ids)
 
-    def flush(self, env_id: int, episode_idx: int, time_origin_s=None):
+    def flush(self, env_id: int, episode_idx: int, time_origin_s=None,
+              metadata=None):
         """Write one event episode with time alignment and algorithm metadata."""
         if self.hybrid_gate_gain > 0.0:
             mode = "v4_hybrid"
@@ -571,7 +572,7 @@ class DVSCamera:
             mode = "v3_adaptive"
         else:
             mode = "v2_balanced"
-        metadata = {
+        event_metadata = {
             "evis_schema_version": 1,
             "evis_mode": mode,
             "evis_event_source": self.event_source,
@@ -582,9 +583,10 @@ class DVSCamera:
             "evis_hybrid_support_radius": self.hybrid_support_radius,
             "evis_mv_dilate": self.mv_dilate,
         }
+        event_metadata.update(metadata or {})
         self.recorder.flush_episode(
             env_id,
             episode_idx,
             time_origin_s=time_origin_s,
-            metadata=metadata,
+            metadata=event_metadata,
         )

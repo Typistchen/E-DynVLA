@@ -865,6 +865,7 @@ def get_next_object(scene_objects, scene, env_idx=None):
 
 def get_env_states(states, n_envs=1):
     KEYS = {
+        "observation_timestamp_s": ("observation_timestamp_s",),
         "sm_state": ("next_state", "sm_state"),
         "ee_pos": ("curr_state", "end_effector", "pos"),
         "ee_quat": ("curr_state", "end_effector", "quat"),
@@ -888,7 +889,11 @@ def get_env_states(states, n_envs=1):
                     continue
                 # Retrieve the value based on the key path
                 if len(v) == 1:
-                    value = es[v[0]][eid].cpu().numpy()
+                    raw_value = es[v[0]]
+                    if torch.is_tensor(raw_value):
+                        value = raw_value[eid].cpu().numpy()
+                    else:
+                        value = np.asarray(raw_value, dtype=np.float64)
                 elif len(v) == 2 and v[1] in es[v[0]]:
                     value = es[v[0]][v[1]][eid].cpu().numpy()
                 elif len(v) == 3 and v[1] in es[v[0]] and v[2] in es[v[0]][v[1]]:
@@ -1021,6 +1026,10 @@ def simulate(sim_cfg, task, robot, scene_dir, object_metadata, seed):
             env.step(torch.from_numpy(env.action_space.sample()))
             continue
 
+        # This timestamp belongs to the state and camera observation captured
+        # below, before env.step() advances physics and event generation.
+        observation_timestamp_s = float(env.unwrapped.sim.current_time)
+
         # Determine the current object to manipulate
         curr_state = get_curr_state(
             env.unwrapped.scene["ee_frame"].data,
@@ -1086,6 +1095,7 @@ def simulate(sim_cfg, task, robot, scene_dir, object_metadata, seed):
             dvs_t_prev = dvs_t_cur
         env_states.append(
             {
+                "observation_timestamp_s": observation_timestamp_s,
                 "cam_views": cam_views,
                 "curr_state": curr_state,
                 "next_state": next_state,
@@ -1097,7 +1107,15 @@ def simulate(sim_cfg, task, robot, scene_dir, object_metadata, seed):
     env_states = get_env_states(env_states, env.unwrapped.num_envs)
     if dvs is not None:
         for env_id in range(env.unwrapped.num_envs):
-            dvs.flush(env_id, seed, time_origin_s=dvs_t_origin)
+            dvs.flush(
+                env_id,
+                seed,
+                time_origin_s=dvs_t_origin,
+                metadata={
+                    "evis_event_threshold": float(sim_cfg["event_threshold"]),
+                    "evis_requested_warp_steps": int(sim_cfg["event_warp"]),
+                },
+            )
     env.close()
     # Ignore the simulation if the task is not finished
     # If in debug mode, save all simulation data even if the task is not finishedq
