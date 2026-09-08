@@ -9,6 +9,7 @@ import gc
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import shutil
 from datetime import datetime, timezone
@@ -46,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event-source", choices=("hdr", "ldr"), required=True)
     parser.add_argument("--device", required=True)
     parser.add_argument("--sample-index", type=int, required=True)
+    parser.add_argument(
+        "--split-by-outcome",
+        action="store_true",
+        help="Store samples under success/ or failure/ according to the outcome label",
+    )
     return parser.parse_args()
 
 
@@ -228,13 +234,17 @@ def write_aedat4_camera(
 
 def write_dataset_info(root: Path) -> None:
     samples = []
-    for reproduction_path in sorted(root.glob("sample_*/reproduction.json")):
+    for reproduction_path in sorted(root.glob("**/sample_*/reproduction.json")):
         with reproduction_path.open(encoding="utf-8") as stream:
             reproduction = json.load(stream)
         source_csv = reproduction.get("source_csv")
+        relative_sample = reproduction_path.parent.relative_to(root)
+        split = relative_sample.parts[0] if len(relative_sample.parts) > 1 else "unsplit"
         samples.append(
             {
                 "sample_index": reproduction["sample_index"],
+                "split": split,
+                "relative_path": relative_sample.as_posix(),
                 "source_csv_row": (
                     source_csv["zero_based_row"] if source_csv is not None else None
                 ),
@@ -284,9 +294,11 @@ def write_dataset_info(root: Path) -> None:
         },
         "samples": samples,
         "total_samples": len(samples),
+        "success_samples": sum(s["split"] == "success" for s in samples),
+        "failure_samples": sum(s["split"] == "failure" for s in samples),
         "updated_utc": datetime.now(timezone.utc).isoformat(),
     }
-    temp_path = root / ".dataset_info.json.tmp"
+    temp_path = root / f".dataset_info.{os.getpid()}.json.tmp"
     with temp_path.open("w", encoding="utf-8") as stream:
         json.dump(info, stream, ensure_ascii=False, indent=2)
     temp_path.replace(root / "dataset_info.json")
@@ -298,10 +310,18 @@ def main() -> None:
     root = args.dataset_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     sample_name = f"sample_{args.sample_index:06d}"
-    final_sample = root / sample_name
     temp_sample = root / f".{sample_name}.tmp"
-    if final_sample.exists():
-        raise FileExistsError(f"Refusing to overwrite existing sample: {final_sample}")
+    existing = [
+        path
+        for path in (
+            root / sample_name,
+            root / "success" / sample_name,
+            root / "failure" / sample_name,
+        )
+        if path.exists()
+    ]
+    if existing:
+        raise FileExistsError(f"Refusing to overwrite existing sample: {existing}")
     if temp_sample.exists():
         shutil.rmtree(temp_sample)
     temp_sample.mkdir()
@@ -405,6 +425,12 @@ def main() -> None:
             "final_object_z_m": final_object_z,
             "maximum_lift_m": lift_height,
         }
+        split_name = "success" if success else "failure"
+        final_sample = (
+            root / split_name / sample_name
+            if args.split_by_outcome
+            else root / sample_name
+        )
 
         expected_timestamp = np.arange(frame_count, dtype=np.float64) / FPS
         if not np.allclose(timestamps_rel, expected_timestamp, atol=1e-6):
@@ -532,6 +558,7 @@ def main() -> None:
             ),
             "initial_condition": generation_manifest,
             "outcome": outcome,
+            "dataset_split": split_name if args.split_by_outcome else "unsplit",
             "event_configuration": {
                 "mode": "v4_hybrid",
                 "source": args.event_source,
@@ -596,6 +623,7 @@ def main() -> None:
         with reproduction_path.open("w", encoding="utf-8") as stream:
             json.dump(reproduction, stream, ensure_ascii=False, indent=2)
 
+        final_sample.parent.mkdir(parents=True, exist_ok=True)
         temp_sample.replace(final_sample)
         write_dataset_info(root)
         total_bytes = sum(

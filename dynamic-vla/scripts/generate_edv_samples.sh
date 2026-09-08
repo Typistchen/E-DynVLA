@@ -30,8 +30,10 @@ mkdir -p "$DATASET_ROOT"
 
 for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
   sample_name=$(printf 'sample_%06d' "$row")
-  if [[ -e "$DATASET_ROOT/$sample_name" ]]; then
-    echo "Refusing to overwrite existing sample: $DATASET_ROOT/$sample_name" >&2
+  if [[ -e "$DATASET_ROOT/$sample_name" \
+     || -e "$DATASET_ROOT/success/$sample_name" \
+     || -e "$DATASET_ROOT/failure/$sample_name" ]]; then
+    echo "Refusing to overwrite existing sample index: $sample_name" >&2
     exit 3
   fi
 
@@ -82,7 +84,8 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
     --event-warp 4 \
     --event-source hdr \
     --device "$DEVICE" \
-    --sample-index "$row"
+    --sample-index "$row" \
+    --split-by-outcome
 
   cleanup_staging
   trap - EXIT

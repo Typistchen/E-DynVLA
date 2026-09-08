@@ -94,8 +94,16 @@ def main() -> None:
         "dataset_root": str(root),
         "samples": [],
     }
-    for sample_index in range(args.expected_samples):
-        sample = root / f"sample_{sample_index:06d}"
+    samples = sorted(
+        [*root.glob("sample_*"), *root.glob("success/sample_*"), *root.glob("failure/sample_*")],
+        key=lambda path: int(path.name.removeprefix("sample_")),
+    )
+    if len(samples) != args.expected_samples:
+        raise RuntimeError(
+            f"Found {len(samples)} sample directories, expected {args.expected_samples}"
+        )
+    for sample in samples:
+        sample_index = int(sample.name.removeprefix("sample_"))
         reproduction = json.loads(
             (sample / "reproduction.json").read_text(encoding="utf-8")
         )
