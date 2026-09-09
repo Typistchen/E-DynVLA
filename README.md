@@ -31,6 +31,7 @@ three RGB MP4 files, three AEDAT4 event streams, and `reproduction.json`.
 ## Quick links
 
 - [Architecture](E-DynVLA/docs/edynvla_architecture.md)
+- [中文代码导读](docs/CODE_GUIDE_ZH.md)
 - [Event generation](E-DynVLA/docs/event_camera.md)
 - [V2E-VLA module](V2E-VLA/README.md)
 - [Controlled benchmarks](benchmark/README.md)
