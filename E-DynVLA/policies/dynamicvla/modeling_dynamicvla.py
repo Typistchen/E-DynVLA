@@ -33,7 +33,11 @@ from policies.dynamicvla.modeling_fastvlm import (
 )
 from policies.dynamicvla.modeling_vlm_with_expert import VLMWithExpertModel
 from policies.edynvla.event_tokenizer import EventTokenBatch, SparseEventTokenizer
-from policies.edynvla.event_wam import EventWAMHead, event_wam_loss
+from policies.edynvla.event_wam import (
+    WorldActionModelHead,
+    multimodal_wam_loss,
+    multimodal_wam_metrics,
+)
 
 # Matches ".soNNN", optionally followed by "-something", up to the "_buffer_" marker
 _VARIANT_RE = re.compile(r"\.so\d+(?:-[\w]+)?_buffer_")
@@ -123,7 +127,7 @@ def load_dynamicvla(
     state_dict = {k: v for k, v in state_dict.items() if not k.startswith(norm_keys)}
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    optional_new_keys = ("model.event_tokenizer.", "model.event_wam_head.")
+    optional_new_keys = ("model.event_tokenizer.", "model.wam_head.")
     if not all(key.startswith(norm_keys + optional_new_keys) for key in missing) or unexpected:
         raise RuntimeError(
             "DynamicVLA %d missing / %d unexpected keys"
@@ -500,6 +504,8 @@ class DynamicVLAPolicy(PreTrainedPolicy):
                 self.config.static_event_key,
                 self.config.dynamic_event_key,
                 self.config.future_event_key,
+                self.config.future_rgb_key,
+                self.config.future_rgb_valid_key,
             )
             if key in batch
         }
@@ -517,6 +523,54 @@ class DynamicVLAPolicy(PreTrainedPolicy):
 
         actions = self._get_action_chunk(batch, noise)
         return actions
+
+    @torch.no_grad()
+    def predict_action_chunk_with_world(
+        self, batch: dict[str, torch.Tensor], noise: torch.Tensor | None = None
+    ) -> dict[str, torch.Tensor]:
+        """Predict an action chunk and its action-conditioned future world.
+
+        RGB has shape ``[B,3,grid_h,grid_w]``. Event probabilities have shape
+        ``[B,future_steps,4,grid_h,grid_w]`` with channels ordered as static-OFF,
+        static-ON, dynamic-OFF, and dynamic-ON.
+        """
+        if not self.config.wam_enabled:
+            raise RuntimeError("WAM is disabled in the policy config")
+
+        self.eval()
+        batch = self._prepare_batch(batch)
+        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
+        for key in batch:
+            if key in self._queues and key != ACTION:
+                batch[key] = torch.stack(list(self._queues[key]), dim=1)
+        images, img_masks = self.prepare_images(batch)
+        state = self.prepare_state(batch)
+        lang_tokens, lang_masks = self.prepare_language(batch)
+        event_batch = self.model.encode_events(self.prepare_events(batch))
+        model_actions, world_context = self.model.sample_actions(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=noise,
+            event_batch=event_batch,
+            return_world_context=True,
+        )
+        future_world = self.model.predict_future_world(
+            *world_context, action_context=model_actions
+        )
+
+        actions = model_actions[:, :, : self.config.action_feature.shape[0]]
+        actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
+        if self.config.adapt_to_pi_aloha:
+            actions = self._pi_aloha_encode_actions(actions)
+        return {
+            ACTION: actions,
+            "future_rgb": future_world.rgb,
+            "future_event_logits": future_world.event_logits,
+            "future_event_probability": future_world.event_logits.sigmoid(),
+        }
 
     @torch.no_grad()
     def select_action(
@@ -626,6 +680,8 @@ class DynamicVLAPolicy(PreTrainedPolicy):
                 self.config.static_event_key,
                 self.config.dynamic_event_key,
                 self.config.future_event_key,
+                self.config.future_rgb_key,
+                self.config.future_rgb_valid_key,
             )
             if key in batch
         }
@@ -640,7 +696,7 @@ class DynamicVLAPolicy(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
-        losses = self.model.forward(
+        model_output = self.model.forward(
             images,
             img_masks,
             lang_tokens,
@@ -650,7 +706,13 @@ class DynamicVLAPolicy(PreTrainedPolicy):
             noise,
             time,
             event_batch=event_batch,
+            return_world_context=self.config.wam_enabled,
         )
+        if self.config.wam_enabled:
+            losses, world_context = model_output
+        else:
+            losses = model_output
+            world_context = None
         loss_dict["losses_after_forward"] = losses.clone()
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
@@ -663,21 +725,42 @@ class DynamicVLAPolicy(PreTrainedPolicy):
 
         # For backward pass
         loss = losses.mean()
-        if self.config.event_wam_enabled:
-            if self.config.future_event_key not in batch:
+        loss_dict["action_loss"] = loss.detach().item()
+        if self.config.wam_enabled:
+            missing_targets = [
+                key
+                for key in (self.config.future_event_key, self.config.future_rgb_key)
+                if key not in batch
+            ]
+            if missing_targets:
                 raise KeyError(
-                    f"missing Event-WAM target: {self.config.future_event_key}"
+                    f"missing WAM targets: {missing_targets}"
                 )
-            future_logits = self.model.predict_future_events(
-                event_batch, state, action_context=actions.detach()
+            future_world = self.model.predict_future_world(
+                *world_context,
+                action_context=actions.detach(),
+                action_mask=None if actions_is_pad is None else ~actions_is_pad,
             )
-            wam_loss = event_wam_loss(
-                future_logits,
+            wam_loss, wam_parts = multimodal_wam_loss(
+                future_world,
+                batch[self.config.future_rgb_key],
                 batch[self.config.future_event_key],
-                positive_weight=self.config.event_wam_positive_weight,
+                rgb_weight=self.config.wam_rgb_loss_weight,
+                event_weight=self.config.wam_event_loss_weight,
+                positive_weight=self.config.wam_positive_weight,
+                rgb_valid_mask=batch.get(self.config.future_rgb_valid_key),
             )
-            loss = loss + self.config.event_wam_loss_weight * wam_loss
-            loss_dict["event_wam_loss"] = wam_loss.item()
+            loss = loss + self.config.wam_loss_weight * wam_loss
+            loss_dict["wam_loss"] = wam_loss.item()
+            loss_dict["wam_rgb_loss"] = wam_parts["rgb_loss"].item()
+            loss_dict["wam_event_loss"] = wam_parts["event_loss"].item()
+            for name, value in multimodal_wam_metrics(
+                future_world,
+                batch[self.config.future_rgb_key],
+                batch[self.config.future_event_key],
+                rgb_valid_mask=batch.get(self.config.future_rgb_valid_key),
+            ).items():
+                loss_dict[f"wam_{name}"] = value.item()
         # For backward pass
         loss_dict["loss"] = loss.item()
         return loss, loss_dict
@@ -914,7 +997,7 @@ class VLAFlowMatching(torch.nn.Module):
         )
         vlm_hidden_size = self.vlm_with_expert.vlm_config.text_config.hidden_size
         self.event_tokenizer = None
-        self.event_wam_head = None
+        self.wam_head = None
         if config.use_event_tokens:
             self.event_tokenizer = SparseEventTokenizer(
                 hidden_dim=config.event_hidden_size,
@@ -926,16 +1009,15 @@ class VLAFlowMatching(torch.nn.Module):
                 num_heads=config.event_num_heads,
                 min_patch_density=config.event_min_patch_density,
             )
-        if config.event_wam_enabled:
-            self.event_wam_head = EventWAMHead(
-                token_dim=vlm_hidden_size,
-                hidden_dim=config.event_wam_hidden_size,
-                state_dim=config.max_state_dim,
+        if config.wam_enabled:
+            self.wam_head = WorldActionModelHead(
+                context_dim=vlm_hidden_size,
+                hidden_dim=config.wam_hidden_size,
                 action_dim=config.max_action_dim,
-                future_steps=config.event_wam_future_steps,
-                grid_size=config.event_wam_grid_size,
-                num_layers=config.event_wam_num_layers,
-                num_heads=config.event_wam_num_heads,
+                future_steps=config.wam_future_steps,
+                grid_size=config.wam_grid_size,
+                num_layers=config.wam_num_layers,
+                num_heads=config.wam_num_heads,
             )
         self._set_requires_grad()
 
@@ -948,19 +1030,22 @@ class VLAFlowMatching(torch.nn.Module):
             raise RuntimeError("received event inputs while event tokenization is disabled")
         return self.event_tokenizer(*events)
 
-    def predict_future_events(
+    def predict_future_world(
         self,
-        event_batch: EventTokenBatch | None,
-        state: torch.Tensor,
+        context_tokens: torch.Tensor,
+        context_mask: torch.Tensor,
         action_context: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if self.event_wam_head is None or event_batch is None:
-            raise RuntimeError("Event-WAM is disabled or event tokens are missing")
-        return self.event_wam_head(
-            event_batch.tokens,
-            event_batch.mask,
-            state,
+        action_mask: torch.Tensor | None = None,
+    ):
+        if self.wam_head is None:
+            raise RuntimeError("WAM is disabled")
+        if action_context is None:
+            raise ValueError("WAM requires an action context")
+        return self.wam_head(
+            context_tokens,
+            context_mask,
             action_history=action_context,
+            action_mask=action_mask,
         )
 
     def _get_vlm_with_expert(
@@ -1204,7 +1289,8 @@ class VLAFlowMatching(torch.nn.Module):
         noise=None,
         time=None,
         event_batch: EventTokenBatch | None = None,
-    ) -> torch.Tensor:
+        return_world_context: bool = False,
+    ):
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
             noise = self._sample_noise(actions.shape, actions.device)
@@ -1243,6 +1329,8 @@ class VLAFlowMatching(torch.nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
+        if return_world_context:
+            return losses, (prefix_embs, prefix_pad_masks)
         return losses
 
     def sample_vlm_embedding(
@@ -1275,7 +1363,7 @@ class VLAFlowMatching(torch.nn.Module):
             use_cache=self.config.use_cache,
             fill_kv_cache=True,
         )
-        return prefix_pad_masks, past_key_values
+        return prefix_pad_masks, past_key_values, prefix_embs
 
     def sample_actions(
         self,
@@ -1286,7 +1374,8 @@ class VLAFlowMatching(torch.nn.Module):
         state,
         noise=None,
         event_batch: EventTokenBatch | None = None,
-    ) -> torch.Tensor:
+        return_world_context: bool = False,
+    ):
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = state.shape[0]
         device = state.device
@@ -1294,7 +1383,7 @@ class VLAFlowMatching(torch.nn.Module):
             actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self._sample_noise(actions_shape, device)
 
-        prefix_pad_masks, past_key_values = self.sample_vlm_embedding(
+        prefix_pad_masks, past_key_values, prefix_embs = self.sample_vlm_embedding(
             images,
             img_masks,
             lang_tokens,
@@ -1319,6 +1408,8 @@ class VLAFlowMatching(torch.nn.Module):
             x_t += dt * v_t
             time += dt
 
+        if return_world_context:
+            return x_t, (prefix_embs, prefix_pad_masks)
         return x_t
 
     def denoise_step(

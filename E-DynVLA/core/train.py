@@ -48,6 +48,8 @@ def train(cfg):
         event_history_bins=cfg.POLICY.get("EVENT_HISTORY_BINS", 8),
         event_bin_ms=cfg.DATASET.get("EVENT_BIN_MS", 10.0),
         event_output_size=cfg.DATASET.get("EVENT_OUTPUT_SIZE", (96, 128)),
+        event_future_steps=cfg.POLICY.get("WAM_FUTURE_STEPS", 10),
+        event_future_grid_size=cfg.POLICY.get("WAM_GRID_SIZE", (12, 16)),
         action_horizon=cfg.POLICY.get("CHUNK_SIZE", 20),
         rotation_format=cfg.DATASET.get("ROTATION_FORMAT", "euler"),
     )
@@ -66,6 +68,8 @@ def train(cfg):
         event_history_bins=cfg.POLICY.get("EVENT_HISTORY_BINS", 8),
         event_bin_ms=cfg.DATASET.get("EVENT_BIN_MS", 10.0),
         event_output_size=cfg.DATASET.get("EVENT_OUTPUT_SIZE", (96, 128)),
+        event_future_steps=cfg.POLICY.get("WAM_FUTURE_STEPS", 10),
+        event_future_grid_size=cfg.POLICY.get("WAM_GRID_SIZE", (12, 16)),
         action_horizon=cfg.POLICY.get("CHUNK_SIZE", 20),
         rotation_format=cfg.DATASET.get("ROTATION_FORMAT", "euler"),
     )
@@ -189,6 +193,7 @@ def train(cfg):
         batch_time = utils.average_meter.AverageMeter()
         data_time = utils.average_meter.AverageMeter()
         train_losses = utils.average_meter.AverageMeter()
+        component_losses = {}
         # Randomize the DistributedSampler
         if train_sampler:
             train_sampler.set_epoch(epoch_idx)
@@ -213,7 +218,12 @@ def train(cfg):
             ):
                 batch["task"] = batch["task"][0]
 
-            loss, _ = policy.forward(batch)
+            loss, loss_dict = policy.forward(batch)
+            for name in ("action_loss", "wam_loss", "wam_rgb_loss", "wam_event_loss"):
+                if name in loss_dict:
+                    component_losses.setdefault(
+                        name, utils.average_meter.AverageMeter()
+                    ).update(loss_dict[name])
             loss = loss / cfg.TRAIN.GRAD_ACCUM_STEPS
             loss.backward()
             if batch_idx % cfg.TRAIN.GRAD_ACCUM_STEPS == 0:
@@ -225,7 +235,17 @@ def train(cfg):
             batch_time.update(time.perf_counter() - batch_end_time)
             batch_end_time = time.perf_counter()
             if utils.distributed.is_master():
-                tb_writer.add_scalars({"Loss/Batch": train_losses.val()}, n_itr)
+                batch_scalars = {"Loss/Batch": train_losses.val()}
+                batch_scalars.update(
+                    {
+                        f"Loss/{name}/Batch": meter.val()
+                        for name, meter in component_losses.items()
+                    }
+                )
+                for name, value in loss_dict.items():
+                    if name.startswith("wam_") and name not in component_losses:
+                        batch_scalars[f"WAM/{name.removeprefix('wam_')}"] = value
+                tb_writer.add_scalars(batch_scalars, n_itr)
                 # Save the model checkpoint every few batches
                 if (
                     cfg.TRAIN.CKPT_SAVE_FREQ.BATCH != 0
@@ -252,7 +272,14 @@ def train(cfg):
 
         epoch_end_time = time.perf_counter()
         if utils.distributed.is_master():
-            tb_writer.add_scalars({"Loss/Epoch/Train": train_losses.avg()}, epoch_idx)
+            epoch_scalars = {"Loss/Epoch/Train": train_losses.avg()}
+            epoch_scalars.update(
+                {
+                    f"Loss/{name}/Epoch": meter.avg()
+                    for name, meter in component_losses.items()
+                }
+            )
+            tb_writer.add_scalars(epoch_scalars, epoch_idx)
 
         if utils.distributed.is_local_master():
             logging.info(

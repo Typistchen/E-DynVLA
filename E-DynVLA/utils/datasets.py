@@ -43,6 +43,8 @@ def get_dataset(
     event_history_bins: int = 8,
     event_bin_ms: float = 10.0,
     event_output_size: tuple[int, int] = (96, 128),
+    event_future_steps: int = 10,
+    event_future_grid_size: tuple[int, int] = (12, 16),
     action_horizon: int = 20,
     rotation_format: str = "euler",
 ) -> torch.utils.data.Dataset:
@@ -60,6 +62,8 @@ def get_dataset(
                 history_bins=event_history_bins,
                 bin_ms=event_bin_ms,
                 output_size=tuple(event_output_size),
+                future_steps=event_future_steps,
+                future_grid_size=tuple(event_future_grid_size),
             ),
             split=split,
             delta_action=delta_action,

@@ -2,7 +2,8 @@
 
 This module contains the VLA side of the project:
 
-- `policies/edynvla/`: sparse event tokenizer, DOM/event adapter, Event-WAM;
+- `policies/edynvla/`: sparse event tokenizer, DOM/event adapter, and an
+  action-conditioned WAM that predicts future RGB patches and future events;
 - `policies/dynamicvla/`: retained DynamicVLA backbone required by E-DynVLA;
 - `simulations/`: retained and adapted DOM/Isaac Lab simulation path;
 - `scripts/`: reproducible EDV generation, packaging, validation, and status;

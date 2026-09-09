@@ -16,11 +16,14 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 
 STATIC_EVENT_KEY = "observation.events.static"
 DYNAMIC_EVENT_KEY = "observation.events.dynamic"
 FUTURE_EVENT_KEY = "observation.events.future_activity"
+FUTURE_RGB_KEY = "observation.wam.future_rgb"
+FUTURE_RGB_VALID_KEY = "observation.wam.future_rgb_valid"
 
 
 @dataclass(frozen=True)
@@ -33,7 +36,7 @@ class EventWindowConfig:
     source_size: tuple[int, int] = (360, 480)
     clip_count: float = 8.0
     future_steps: int = 10
-    future_patch_size: int = 8
+    future_grid_size: tuple[int, int] = (12, 16)
 
     @property
     def bin_seconds(self) -> float:
@@ -158,9 +161,7 @@ class SeparatedEventWindowReader:
         )
         arrays = self._read_slice(int(lo), int(hi))
         illumination_keep = np.clip(1.0 - arrays["q_illumination"], 0.0, 1.0)
-        output_h, output_w = self.config.output_size
-        patch = self.config.future_patch_size
-        grid_size = (max(1, output_h // patch), max(1, output_w // patch))
+        grid_size = self.config.future_grid_size
         static = voxelize_weighted_events(
             x=arrays["x"],
             y=arrays["y"],
@@ -301,6 +302,24 @@ class DOMEventDataset(torch.utils.data.Dataset):
             state = self._state_array(dom, slice(frame_index, frame_index + 1))[0]
             sample["observation.state"] = torch.from_numpy(state)
             n_frames = int(dom["action"].shape[0])
+            future_offset = max(
+                1,
+                round(
+                    self.event_config.future_steps
+                    * self.event_config.bin_seconds
+                    * self.event_config.fps
+                ),
+            )
+            future_index = frame_index + future_offset
+            clamped_future_index = min(future_index, n_frames - 1)
+            future_rgb = np.asarray(
+                dom[f"{self.event_config.sensor}_rgb"][clamped_future_index]
+            )
+            future_rgb = (
+                torch.from_numpy(future_rgb.copy()).permute(2, 0, 1).float() / 255.0
+            )
+            sample[FUTURE_RGB_KEY] = future_rgb
+            sample[FUTURE_RGB_VALID_KEY] = torch.tensor(future_index < n_frames)
             valid_actions = self._action_array(np.asarray(
                 dom["action"][frame_index : frame_index + self.action_horizon],
                 dtype=np.float32,
@@ -325,7 +344,14 @@ class DOMEventDataset(torch.utils.data.Dataset):
             action_dim = sample["action"].shape[-1] - 1
             sample["action"][..., :action_dim] -= sample["observation.state"][:action_dim]
         if self.image_transforms is not None:
-            sample = self.image_transforms(sample, self.camera_keys)
+            sample = self.image_transforms(
+                sample, [*self.camera_keys, FUTURE_RGB_KEY]
+            )
+        sample[FUTURE_RGB_KEY] = F.interpolate(
+            sample[FUTURE_RGB_KEY][None],
+            size=self.event_config.future_grid_size,
+            mode="area",
+        )[0]
         return sample
 
     def close(self) -> None:

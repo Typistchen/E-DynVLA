@@ -99,6 +99,8 @@ class DynamicVLAConfig(PreTrainedConfig):
     static_event_key: str = "observation.events.static"
     dynamic_event_key: str = "observation.events.dynamic"
     future_event_key: str = "observation.events.future_activity"
+    future_rgb_key: str = "observation.wam.future_rgb"
+    future_rgb_valid_key: str = "observation.wam.future_rgb_valid"
     event_history_bins: int = 8
     event_hidden_size: int = 256
     event_patch_size: int = 16
@@ -106,15 +108,17 @@ class DynamicVLAConfig(PreTrainedConfig):
     event_num_layers: int = 2
     event_num_heads: int = 8
     event_min_patch_density: float = 1e-6
-    # Optional short-horizon Event-WAM auxiliary objective.
-    event_wam_enabled: bool = False
-    event_wam_hidden_size: int = 256
-    event_wam_num_layers: int = 4
-    event_wam_num_heads: int = 8
-    event_wam_future_steps: int = 10
-    event_wam_grid_size: tuple[int, int] = (12, 16)
-    event_wam_loss_weight: float = 0.1
-    event_wam_positive_weight: float = 4.0
+    # Action-conditioned multimodal world model (future RGB + events).
+    wam_enabled: bool = False
+    wam_hidden_size: int = 256
+    wam_num_layers: int = 4
+    wam_num_heads: int = 8
+    wam_future_steps: int = 10
+    wam_grid_size: tuple[int, int] = (12, 16)
+    wam_loss_weight: float = 0.1
+    wam_rgb_loss_weight: float = 1.0
+    wam_event_loss_weight: float = 1.0
+    wam_positive_weight: float = 4.0
     # sensitivity range for the timestep used in sine-cosine positional encoding
     min_period: float = 4e-3
     max_period: float = 4.0
@@ -134,8 +138,12 @@ class DynamicVLAConfig(PreTrainedConfig):
                 "`use_delta_joint_actions_aloha` is used by dynamicvla for aloha real"
                 " models. It is not ported yet in LeRobot."
             )
-        if self.event_wam_enabled and not self.use_event_tokens:
-            raise ValueError("event_wam_enabled requires use_event_tokens=True")
+        if self.wam_enabled and not self.use_event_tokens:
+            raise ValueError("wam_enabled requires use_event_tokens=True")
+        if self.wam_enabled and self.wam_future_steps < 1:
+            raise ValueError("wam_future_steps must be positive")
+        if self.wam_enabled and any(v < 1 for v in self.wam_grid_size):
+            raise ValueError("wam_grid_size values must be positive")
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):

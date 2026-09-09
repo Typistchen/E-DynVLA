@@ -14,9 +14,9 @@ v4-hybrid events
                                 sparse event tokenizer -> event tokens
   -> dynamic event history --/
 
-[RGB, language, static-event, dynamic-event, state] prefix
+[RGB, language, static-event, dynamic-event, state] shared prefix
   -> DynamicVLA flow-matching action expert -> action chunk
-  -> Event-WAM auxiliary head              -> future event activity
+  -> action-conditioned WAM                 -> future RGB + future events
 ```
 
 ## Why this is not an object detector
@@ -40,13 +40,20 @@ bins at 96 x 128 resolution. The tokenizer keeps eight high-density patches
 per bin and modality, adds time/type/coordinate embeddings, aggregates them
 with a two-layer Transformer, and projects them to the 768-wide VLM space.
 
-## Event-WAM target
+## WAM targets
 
-The auxiliary target is ten future 10 ms steps on a 12 x 16 patch grid with
-four channels: static-OFF, static-ON, dynamic-OFF, and dynamic-ON. The action
-loss remains the existing flow-matching objective. The WAM loss teaches the
-shared event tokenizer short-horizon dynamics and can be disabled for a
-controlled ablation.
+The WAM consumes the shared multimodal prefix and a proposed action chunk. It
+predicts (1) the future wrist RGB frame at the prediction horizon on a 12 x 16
+patch grid and (2) ten future 10 ms event steps on the same grid with four
+channels: static-OFF, static-ON, dynamic-OFF, and dynamic-ON. RGB uses a robust
+Smooth-L1 objective, while sparse events use positive-weighted BCE. The action
+loss remains the existing flow-matching objective. This makes the module a
+world-action model rather than an event-only auxiliary head.
+
+At inference, `DynamicVLAPolicy.predict_action_chunk_with_world` returns the
+action chunk, future RGB prediction, and future event probabilities. Normal
+`predict_action_chunk` remains unchanged, so the WAM can be disabled or omitted
+when its predictions are not needed.
 
 ## Dataset contract
 
@@ -63,7 +70,7 @@ stored in Git.
 The existing ten-demo set is an integration and evaluation set, not enough to
 train a language/action model from scratch. Training should use the full DOM
 episode corpus and its v4-hybrid eventized counterpart; the Small VLM remains
-frozen initially while the event tokenizer, projector, Event-WAM head, and
+frozen initially while the event tokenizer, projector, WAM head, and
 action expert are optimized.
 
 ## Required ablations
@@ -73,4 +80,4 @@ action expert are optimized.
 3. RGB + static event tokens.
 4. RGB + dynamic event tokens.
 5. RGB + static/dynamic event tokens.
-6. RGB + static/dynamic event tokens + Event-WAM.
+6. RGB + static/dynamic event tokens + RGB/Event WAM.
