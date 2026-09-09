@@ -9,12 +9,19 @@ SCRATCH_ROOT=/vepfs-cnbj438438cfe4f9/scratch/jiaqi
 DOM_ROOT="$SCRATCH_ROOT/code/E-DynVLA/dynamic-vla"
 DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
 LOG_ROOT="$SCRATCH_ROOT/logs/edv_500g"
+TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"
 COUNTER_FILE="$DATASET_ROOT/.next_sample_index"
 COUNTER_LOCK="$DATASET_ROOT/.next_sample_index.lock"
 TARGET_BYTES=$((TARGET_GIB * 1024 * 1024 * 1024))
 MIN_FREE_BYTES=$((100 * 1024 * 1024 * 1024))
 
-mkdir -p "$DATASET_ROOT/success" "$DATASET_ROOT/failure" "$LOG_ROOT"
+mkdir -p "$DATASET_ROOT/success" "$DATASET_ROOT/failure" "$LOG_ROOT" "$TEMP_ROOT"
+
+# The server root filesystem is small and /tmp may fill during long Isaac Sim
+# runs. Keep Python/Kit temporary files on the large VEPFS scratch volume.
+export TMPDIR="$TEMP_ROOT"
+export TMP="$TEMP_ROOT"
+export TEMP="$TEMP_ROOT"
 
 dataset_bytes() {
   du -sb "$DATASET_ROOT/success" "$DATASET_ROOT/failure" 2>/dev/null \
@@ -77,9 +84,9 @@ run_worker() {
 
 initialize_counter
 echo "[$(date --iso-8601=seconds)] target=${TARGET_GIB}GiB gpus=$GPU_A,$GPU_B"
-run_worker "$GPU_A" > "$LOG_ROOT/worker_${GPU_A//:/_}.log" 2>&1 &
+run_worker "$GPU_A" >> "$LOG_ROOT/worker_${GPU_A//:/_}.log" 2>&1 &
 PID_A=$!
-run_worker "$GPU_B" > "$LOG_ROOT/worker_${GPU_B//:/_}.log" 2>&1 &
+run_worker "$GPU_B" >> "$LOG_ROOT/worker_${GPU_B//:/_}.log" 2>&1 &
 PID_B=$!
 printf '%s\n' "$PID_A" > "$LOG_ROOT/worker_${GPU_A//:/_}.pid"
 printf '%s\n' "$PID_B" > "$LOG_ROOT/worker_${GPU_B//:/_}.pid"

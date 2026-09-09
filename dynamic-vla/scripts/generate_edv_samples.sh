@@ -16,17 +16,21 @@ DOM_ROOT="$SCRATCH_ROOT/code/E-DynVLA/dynamic-vla"
 EVENT_ROOT="$SCRATCH_ROOT/code/raw_event_generator"
 ASSET_ROOT="$SCRATCH_ROOT/dataset/dom_assets"
 DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
+TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"
 GENERATOR_REVISION=edv-v4-dom-stratified-aedat4
 SAMPLER=${EDV_SAMPLER:-dom_stratified}
 SEED_BASE=${EDV_SEED_BASE:-42}
 
 export XDG_CACHE_HOME="$SCRATCH_ROOT/environment/cache"
 export PIP_CACHE_DIR="$SCRATCH_ROOT/environment/cache/pip"
+export TMPDIR="$TEMP_ROOT"
+export TMP="$TEMP_ROOT"
+export TEMP="$TEMP_ROOT"
 export OMNI_KIT_ACCEPT_EULA=YES
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$EVENT_ROOT:${PYTHONPATH:-}"
 
-mkdir -p "$DATASET_ROOT"
+mkdir -p "$DATASET_ROOT" "$TEMP_ROOT"
 
 for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
   sample_name=$(printf 'sample_%06d' "$row")
