@@ -9,6 +9,7 @@ import csv
 import glob
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -201,7 +202,14 @@ def main() -> None:
     # Omniverse must be launched before importing the DOM simulator.
     from isaaclab.app import AppLauncher
 
-    launcher = AppLauncher(headless=True, enable_cameras=True, device=args.device)
+    launcher = AppLauncher(
+        headless=True,
+        enable_cameras=True,
+        device=args.device,
+        distributed=os.getenv("EDV_ISOLATE_GPU") == "1",
+        multi_gpu=False,
+        kit_args="--/renderer/multiGpu/enabled=false",
+    )
     simulation_app = launcher.app
 
     try:

@@ -56,7 +56,12 @@ allocate_index() {
 
 run_worker() {
   local device=$1
+  local physical_index=${device#cuda:}
   local current available sample_index
+  if [[ ! "$physical_index" =~ ^[0-9]+$ ]]; then
+    echo "Invalid physical CUDA device: $device" >&2
+    return 2
+  fi
   while true; do
     current=$(dataset_bytes)
     if (( current >= TARGET_BYTES )); then
@@ -71,9 +76,13 @@ run_worker() {
 
     sample_index=$(allocate_index)
     echo "[$(date --iso-8601=seconds)] start sample=$sample_index device=$device bytes=$current"
-    if EDV_DATASET_ROOT="$DATASET_ROOT" EDV_SAMPLER=dom_stratified \
+    if CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$physical_index" \
+      LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 \
+      HAWK_PHYSICAL_LOCAL_RANK="$physical_index" EDV_ISOLATE_GPU=1 \
+      EDV_PHYSICAL_DEVICE="$device" \
+      EDV_DATASET_ROOT="$DATASET_ROOT" EDV_SAMPLER=dom_stratified \
       EDV_SEED_BASE=42 bash "$DOM_ROOT/scripts/generate_edv_samples.sh" \
-      "$sample_index" 1 "$device"; then
+      "$sample_index" 1 cuda:0; then
       current=$(dataset_bytes)
       echo "[$(date --iso-8601=seconds)] done sample=$sample_index device=$device bytes=$current"
     else

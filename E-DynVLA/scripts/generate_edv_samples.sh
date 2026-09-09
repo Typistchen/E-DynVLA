@@ -4,6 +4,7 @@ set -euo pipefail
 START_ROW=${1:-0}
 COUNT=${2:-1}
 DEVICE=${3:-cuda:2}
+PHYSICAL_DEVICE=${EDV_PHYSICAL_DEVICE:-$DEVICE}
 
 if (( START_ROW < 0 || COUNT < 1 )); then
   echo "Usage: $0 [start_row>=0] [count>=1] [cuda:N]" >&2
@@ -88,7 +89,7 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
     --event-threshold 0.15 \
     --event-warp 4 \
     --event-source hdr \
-    --device "$DEVICE" \
+    --device "$PHYSICAL_DEVICE" \
     --sample-index "$row" \
     --split-by-outcome
 
