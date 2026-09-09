@@ -12,8 +12,9 @@ fi
 
 SCRATCH_ROOT=/vepfs-cnbj438438cfe4f9/scratch/jiaqi
 PYTHON_BIN="$SCRATCH_ROOT/environment/isaaclab45_dom/bin/python"
-DOM_ROOT="$SCRATCH_ROOT/code/E-DynVLA/dynamic-vla"
-EVENT_ROOT="$SCRATCH_ROOT/code/raw_event_generator"
+DOM_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO_ROOT=$(cd "$DOM_ROOT/.." && pwd)
+EVENT_ROOT="${V2E_VLA_ROOT:-$REPO_ROOT/V2E-VLA}"
 ASSET_ROOT="$SCRATCH_ROOT/dataset/dom_assets"
 DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
 TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"

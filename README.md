@@ -1,58 +1,44 @@
 # E-DynVLA
 
-E-DynVLA combines DOM robot-manipulation episodes with v4-hybrid event-camera
-simulation, lighting-suppressed ego-motion separation, sparse static/dynamic
-event tokens, DynamicVLA action prediction, and an optional Event-WAM
-short-horizon prediction objective.
+E-DynVLA is a compact research repository for dynamic manipulation with RGB,
+robot state, language, and event-camera observations. The repository contains
+two maintained modules:
 
-The repository starts from a clean, squashed source snapshot so its GitHub
-contributor graph reflects development in this repository. The upstream
-licenses and attribution remain in the corresponding source directories.
+- [`V2E-VLA/`](V2E-VLA/): v4-hybrid RGB/HDR-to-event generation, event I/O,
+  visualization, evaluation, and lighting-aware motion separation.
+- [`E-DynVLA/`](E-DynVLA/): DOM/Isaac Lab data generation, reproducible EDV
+  packaging, event tokenization, Event-WAM, training, and inference.
 
-## New event-token path
+[`benchmark/`](benchmark/) contains controlled v2/v3/v4 and motion-separation
+evaluation scripts. Generated datasets, assets, environments, and checkpoints
+are intentionally stored outside Git.
 
-- Architecture: [`dynamic-vla/docs/edynvla_architecture.md`](dynamic-vla/docs/edynvla_architecture.md)
-- Training preset: [`dynamic-vla/configs/edynvla.yaml`](dynamic-vla/configs/edynvla.yaml)
-- Event tokenizer: [`dynamic-vla/policies/edynvla/event_tokenizer.py`](dynamic-vla/policies/edynvla/event_tokenizer.py)
-- Event-WAM head: [`dynamic-vla/policies/edynvla/event_wam.py`](dynamic-vla/policies/edynvla/event_wam.py)
-- DOM/event adapter: [`dynamic-vla/policies/edynvla/data.py`](dynamic-vla/policies/edynvla/data.py)
+## Data pipeline
 
-## Repository layout
-
-- `isaac-sim-event-camera-plugin/`: EVIS event generation, multi-threshold
-  v4-hybrid event model, confidence, HDF5 recording, motion separation, and
-  evaluation tools.
-- `dynamic-vla/`: DOM simulation, DynamicVLA policy, paired DOM/event loader,
-  sparse event tokenizer, and Event-WAM head.
-- `benchmark/`: controlled EVIS results and reproducible dataset manifests.
-
-Generated datasets and videos are intentionally not tracked. Set
-`EDYNVLA_DATA_ROOT` to the external paired DOM/event dataset directory before
-using `dynamic-vla/configs/edynvla.yaml`.
-
-## Provenance
-
-This project builds on DynamicVLA and the JHU Isaac Sim event-camera plugin.
-Their licenses and author attribution are preserved inside the corresponding
-directories. Git history is intentionally squashed at import so the GitHub
-contributor graph records contributions made specifically in E-DynVLA.
-
-See `dynamic-vla/docs/event_camera.md` for event generation commands and
-`dynamic-vla/docs/edynvla_architecture.md` for the new model/data contract.
-
-## Quick start for the paired ten-demo set
-
-```bash
-export EDYNVLA_DATA_ROOT=/path/to/motion_separation_10
-
-python dynamic-vla/scripts/build_edynvla_manifest.py \
-  --root "$EDYNVLA_DATA_ROOT" \
-  --output benchmark/manifests/dom_event_10demo.json
-
-cd dynamic-vla
-python run.py --cfg configs/edynvla.yaml --gpus 0
+```text
+DOM + Isaac Lab
+  -> three RGB views + aligned robot/action data
+  -> V2E-VLA v4-hybrid raw events
+  -> lighting-suppressed static/dynamic event streams
+  -> sparse event tokens + RGB/language/state
+  -> E-DynVLA action prediction (+ optional Event-WAM)
 ```
 
-The ten demos validate data alignment and model wiring. They are not treated as
-sufficient data to train the Small VLM from scratch; the intended training set
-is the full DOM corpus with matching eventized episodes.
+The generated dataset is organized as `success/sample_xxxxxx/` and
+`failure/sample_xxxxxx/`. Each sample contains observation-aligned Parquet,
+three RGB MP4 files, three AEDAT4 event streams, and `reproduction.json`.
+
+## Quick links
+
+- [Architecture](E-DynVLA/docs/edynvla_architecture.md)
+- [Event generation](E-DynVLA/docs/event_camera.md)
+- [V2E-VLA module](V2E-VLA/README.md)
+- [Controlled benchmarks](benchmark/README.md)
+
+## Upstream components
+
+Only the DynamicVLA and EVIS components required by this project are retained.
+They have been integrated into the two modules above; the original project
+layouts, examples, media, and unrelated utilities are not mirrored here.
+Licenses and attribution are preserved in the module license files and
+[`THIRD_PARTY.md`](THIRD_PARTY.md).

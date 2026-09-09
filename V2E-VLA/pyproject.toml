@@ -3,13 +3,13 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dvs_gen"
-version = "0.1.0"
-description = "DVS (event camera) data generation in Isaac Lab, accelerated by motion-vector frame interpolation"
+name = "v2e-vla"
+version = "0.4.0"
+description = "Event generation and lighting-aware motion separation for E-DynVLA"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Linli Shi", email = "cnshilinli@gmail.com" }]
+authors = [{ name = "Typistchen" }]
 keywords = ["event-camera", "dvs", "isaac-lab", "isaac-sim", "simulation", "optical-flow"]
 
 # NOTE: isaaclab / isaacsim / omni.* / pxr are provided by the Isaac Lab Python
@@ -35,7 +35,7 @@ full = [
 ]
 
 [project.urls]
-Repository = "https://github.com/spikelab-jhu/object_dvs_generator"
+Repository = "https://github.com/Typistchen/E-DynVLA/tree/main/V2E-VLA"
 
 [tool.setuptools.packages.find]
 include = ["dvs_gen*"]

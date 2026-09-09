@@ -7,7 +7,7 @@ Install the local plugin into the IsaacLab environment:
 
 ```bash
 /home/typist/miniconda3/envs/isaaclab/bin/python -m pip install \
-  -e /home/typist/dataset/dom_simulation/isaac-sim-event-camera-plugin --no-deps
+  -e /home/typist/dataset/dom_simulation/E-DynVLA/V2E-VLA --no-deps
 ```
 
 Generate one episode with three 360x480 DOM event cameras. The base cameras run

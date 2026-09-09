@@ -3,11 +3,12 @@
 set -euo pipefail
 
 ISAAC_ENV=${ISAAC_ENV:-/home/typist/miniconda3/envs/isaaclab}
-WORKSPACE=${WORKSPACE:-/home/typist/dataset/dom_simulation}
-DATA_ROOT=${DATA_ROOT:-$WORKSPACE/datasets/evis_benchmark_10}
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+WORKSPACE=${WORKSPACE:-$REPO_ROOT}
+DATA_ROOT=${DATA_ROOT:-$WORKSPACE/../datasets/evis_benchmark_10}
 PYTHON="$ISAAC_ENV/bin/python"
-EVALUATOR="$WORKSPACE/isaac-sim-event-camera-plugin/scripts/evaluate_evis_versions.py"
-AGGREGATOR="$WORKSPACE/isaac-sim-event-camera-plugin/scripts/aggregate_evis_reports.py"
+EVALUATOR="$WORKSPACE/V2E-VLA/scripts/evaluate_evis_versions.py"
+AGGREGATOR="$WORKSPACE/V2E-VLA/scripts/aggregate_evis_reports.py"
 
 episode_h5() {
   find "$1" -maxdepth 1 -type f -name '*.h5' | sort | head -n 1

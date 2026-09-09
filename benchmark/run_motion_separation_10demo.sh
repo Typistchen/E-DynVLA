@@ -3,22 +3,23 @@
 set -euo pipefail
 
 ISAAC_ENV=${ISAAC_ENV:-/home/typist/miniconda3/envs/isaaclab}
-WORKSPACE=${WORKSPACE:-/home/typist/dataset/dom_simulation}
-OUTPUT_ROOT=${OUTPUT_ROOT:-$WORKSPACE/datasets/motion_separation_10}
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+WORKSPACE=${WORKSPACE:-$REPO_ROOT}
+OUTPUT_ROOT=${OUTPUT_ROOT:-$WORKSPACE/../datasets/motion_separation_10}
 START_SEED=${1:-1}
 END_SEED=${2:-10}
 PYTHON="$ISAAC_ENV/bin/python"
-SIM_ROOT="$WORKSPACE/dynamic-vla"
-PLUGIN_ROOT="$WORKSPACE/isaac-sim-event-camera-plugin"
-VALIDATOR="$WORKSPACE/V2E_VLA/benchmark/validate_evis_capture.py"
+SIM_ROOT="$WORKSPACE/E-DynVLA"
+PLUGIN_ROOT="$WORKSPACE/V2E-VLA"
+VALIDATOR="$WORKSPACE/benchmark/validate_evis_capture.py"
 
 export OMNI_KIT_ACCEPT_EULA=YES
 mkdir -p "$OUTPUT_ROOT"
 {
   echo "generated_at=$(date --iso-8601=seconds)"
   echo "workspace=$WORKSPACE"
-  echo "dynamic_vla_commit=$(git -C "$SIM_ROOT" rev-parse HEAD)"
-  echo "evis_commit=$(git -C "$PLUGIN_ROOT" rev-parse HEAD)"
+  echo "edynvla_commit=$(git -C "$WORKSPACE" rev-parse HEAD)"
+  echo "v2e_vla_commit=$(git -C "$WORKSPACE" rev-parse HEAD)"
   echo "evis_mode=v4_hybrid"
   echo "event_source=hdr"
   echo "event_threshold=0.15"

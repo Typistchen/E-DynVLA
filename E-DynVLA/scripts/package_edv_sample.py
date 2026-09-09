@@ -320,7 +320,7 @@ def main() -> None:
         },
         "reproduction_command": (
             "bash /vepfs-cnbj438438cfe4f9/scratch/jiaqi/code/"
-            "E-DynVLA/dynamic-vla/scripts/generate_edv_row0.sh"
+            "E-DynVLA/E-DynVLA/scripts/generate_edv_row0.sh"
         ),
         "determinism_note": (
             "The realized scene and selected USD checksums are recorded. GPU physics/rendering "

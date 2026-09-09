@@ -6,7 +6,7 @@ GPU_A=${2:-cuda:2}
 GPU_B=${3:-cuda:3}
 
 SCRATCH_ROOT=/vepfs-cnbj438438cfe4f9/scratch/jiaqi
-DOM_ROOT="$SCRATCH_ROOT/code/E-DynVLA/dynamic-vla"
+DOM_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
 LOG_ROOT="$SCRATCH_ROOT/logs/edv_500g"
 TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"

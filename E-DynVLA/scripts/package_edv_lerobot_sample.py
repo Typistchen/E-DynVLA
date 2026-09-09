@@ -611,7 +611,7 @@ def main() -> None:
             "file_sha256": files,
             "reproduction_command": (
                 reproduction_env
-                + f"bash dynamic-vla/scripts/generate_edv_samples.sh "
+                + f"bash E-DynVLA/scripts/generate_edv_samples.sh "
                 f"{args.row} 1 {args.device}"
             ),
             "determinism_note": (
