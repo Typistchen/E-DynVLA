@@ -22,6 +22,7 @@ TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"
 GENERATOR_REVISION=edv-v4-dom-stratified-aedat4
 SAMPLER=${EDV_SAMPLER:-dom_stratified}
 SEED_BASE=${EDV_SEED_BASE:-42}
+KEEP_FAILURES=${EDV_KEEP_FAILURES:-1}
 
 export XDG_CACHE_HOME="$SCRATCH_ROOT/environment/cache"
 export PIP_CACHE_DIR="$SCRATCH_ROOT/environment/cache/pip"
@@ -92,6 +93,11 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
     --device "$PHYSICAL_DEVICE" \
     --sample-index "$row" \
     --split-by-outcome
+
+  if [[ "$KEEP_FAILURES" == "0" && -d "$DATASET_ROOT/failure/$sample_name" ]]; then
+    rm -rf -- "$DATASET_ROOT/failure/$sample_name"
+    echo "[EDV] discarded failed sample: $sample_name"
+  fi
 
   cleanup_staging
   trap - EXIT

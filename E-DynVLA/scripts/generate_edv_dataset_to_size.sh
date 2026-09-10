@@ -24,8 +24,7 @@ export TMP="$TEMP_ROOT"
 export TEMP="$TEMP_ROOT"
 
 dataset_bytes() {
-  du -sb "$DATASET_ROOT/success" "$DATASET_ROOT/failure" 2>/dev/null \
-    | awk '{sum += $1} END {print sum + 0}'
+  du -sb "$DATASET_ROOT/success" 2>/dev/null | awk '{print $1 + 0}'
 }
 
 initialize_counter() {
@@ -80,6 +79,7 @@ run_worker() {
       LOCAL_RANK=0 RANK=0 WORLD_SIZE=1 \
       HAWK_PHYSICAL_LOCAL_RANK="$physical_index" EDV_ISOLATE_GPU=1 \
       EDV_PHYSICAL_DEVICE="$device" \
+      EDV_KEEP_FAILURES=0 \
       EDV_DATASET_ROOT="$DATASET_ROOT" EDV_SAMPLER=dom_stratified \
       EDV_SEED_BASE=42 bash "$DOM_ROOT/scripts/generate_edv_samples.sh" \
       "$sample_index" 1 cuda:0; then
