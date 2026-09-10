@@ -30,6 +30,7 @@ FPS = 25
 WIDTH = 480
 HEIGHT = 360
 AEDAT_PACKET_EVENTS = 100_000
+MOTION_SUPPORT_CAMERA = "wrist_cam"
 
 
 def parse_args() -> argparse.Namespace:
@@ -232,6 +233,80 @@ def write_aedat4_camera(
     }
 
 
+def write_motion_support_h5(
+    source_path: Path,
+    target_path: Path,
+    camera: str,
+    time_origin_s: float,
+) -> dict[str, Any]:
+    """Copy observation-aligned geometry needed for motion separation.
+
+    Dense image tensors use float16, one-frame chunks, and LZF compression so
+    training workers can read one observation without decoding the episode.
+    """
+    field_map = {
+        "depth_metric": f"{camera}_depth_metric",
+        "motion_vectors": f"{camera}_motion_vectors",
+        "pose_w_ros": f"{camera}_pose_w_ros",
+        "intrinsics": f"{camera}_intrinsics",
+    }
+    with h5py.File(source_path, "r", libver="latest") as source:
+        missing = [source_key for source_key in field_map.values() if source_key not in source]
+        if missing:
+            raise RuntimeError(
+                "Source episode is missing motion-separation support fields: "
+                f"{missing}. Regenerate with event_dynamic_gt enabled."
+            )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(target_path, "w", libver="earliest") as target:
+            target.attrs["schema_version"] = "edv-motion-support-v1"
+            target.attrs["camera"] = camera
+            target.attrs["fps"] = FPS
+            target.attrs["description"] = (
+                "Per-observation geometry for ego-motion compensated event "
+                "static/dynamic separation; not a model target."
+            )
+            shapes = {}
+            dtypes = {}
+            for out_key, source_key in field_map.items():
+                data = source[source_key][:]
+                if (
+                    out_key == "depth_metric"
+                    and data.ndim == 4
+                    and data.shape[-1] == 1
+                ):
+                    data = data[..., 0]
+                if out_key in {"depth_metric", "motion_vectors"}:
+                    data = data.astype(np.float16, copy=False)
+                    chunks = (1, *data.shape[1:])
+                    target.create_dataset(
+                        out_key,
+                        data=data,
+                        chunks=chunks,
+                        compression="lzf",
+                        shuffle=True,
+                    )
+                else:
+                    data = data.astype(np.float32, copy=False)
+                    target.create_dataset(out_key, data=data)
+                shapes[out_key] = list(data.shape)
+                dtypes[out_key] = str(data.dtype)
+            timestamps = (
+                source["observation_timestamp_s"][:].astype(np.float64)
+                - time_origin_s
+            )
+            target.create_dataset("timestamp", data=timestamps)
+            shapes["timestamp"] = list(timestamps.shape)
+            dtypes["timestamp"] = str(timestamps.dtype)
+    return {
+        "camera": camera,
+        "fields": [*field_map.keys(), "timestamp"],
+        "shape": shapes,
+        "dtype": dtypes,
+        "size_bytes": target_path.stat().st_size,
+    }
+
+
 def write_dataset_info(root: Path) -> None:
     samples = []
     for reproduction_path in sorted(root.glob("**/sample_*/reproduction.json")):
@@ -266,7 +341,7 @@ def write_dataset_info(root: Path) -> None:
             }
         )
     info = {
-        "schema_version": "edv-3.0",
+        "schema_version": "edv-4.0",
         "description": "DOM RGB/action/state observations paired with v4-hybrid events",
         "sample_path": "sample_{sample_index:06d}",
         "cameras": list(CAMERAS),
@@ -291,6 +366,19 @@ def write_dataset_info(root: Path) -> None:
             "confidence_q_saved": False,
             "observation_offsets_saved": False,
             "alignment": "derive later from AEDAT4 t and Parquet timestamp",
+        },
+        "motion_separation_support": {
+            "container": "HDF5",
+            "camera": MOTION_SUPPORT_CAMERA,
+            "path": f"support/{MOTION_SUPPORT_CAMERA}_motion_support.h5",
+            "fields": [
+                "depth_metric",
+                "motion_vectors",
+                "pose_w_ros",
+                "intrinsics",
+                "timestamp",
+            ],
+            "used_for": "static/dynamic separation from raw events",
         },
         "samples": samples,
         "total_samples": len(samples),
@@ -485,6 +573,18 @@ def main() -> None:
             )
             event_paths[camera] = event_path
 
+        support_path = (
+            temp_sample
+            / "support"
+            / f"{MOTION_SUPPORT_CAMERA}_motion_support.h5"
+        )
+        support_metadata = write_motion_support_h5(
+            source_h5,
+            support_path,
+            MOTION_SUPPORT_CAMERA,
+            time_origin_s,
+        )
+
         selected_assets = {}
         for name in ("house", "object", "container"):
             path_string = (
@@ -509,7 +609,7 @@ def main() -> None:
         files = {
             parquet_path.relative_to(temp_sample).as_posix(): sha256_file(parquet_path)
         }
-        for path in (*video_paths.values(), *event_paths.values()):
+        for path in (*video_paths.values(), *event_paths.values(), support_path):
             files[path.relative_to(temp_sample).as_posix()] = sha256_file(path)
 
         reproduction_env = ""
@@ -540,7 +640,7 @@ def main() -> None:
             }
 
         reproduction = {
-            "schema_version": "edv-3.0",
+            "schema_version": "edv-4.0",
             "sample_index": args.sample_index,
             "frame_count": frame_count,
             "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -572,6 +672,14 @@ def main() -> None:
                 "motion_vector_dilation_px": 1,
                 "stored_fields": ["x", "y", "t", "p"],
                 "confidence_q_saved": False,
+            },
+            "motion_separation_support": {
+                "format": "HDF5",
+                "path": support_path.relative_to(temp_sample).as_posix(),
+                "used_for": (
+                    "online/static-dynamic event separation from raw events"
+                ),
+                **support_metadata,
             },
             "time_alignment": {
                 "common_origin_isaac_time_s": time_origin_s,
