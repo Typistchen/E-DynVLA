@@ -243,7 +243,7 @@ def _set_up_scene_cameras(scene_cfg, sim_cfg, robot):
         event_warp=sim_cfg["event_warp"] > 1,
     )
     # CameraData poses are otherwise initialisation-only in Isaac Lab. ECDM
-    # needs the current wrist pose at every RGB/event keyframe.
+    # needs the current pose at every RGB/event keyframe.
     wrist_camera_cfg.update_latest_camera_pose = sim_cfg["event_dynamic_gt"]
     scene_cfg = configs.scene_cfg.add_scene_camera(
         scene_cfg,
@@ -252,17 +252,19 @@ def _set_up_scene_cameras(scene_cfg, sim_cfg, robot):
     )
     # Set up the cameras according to relative position in the config file
     for cam in sim_cfg["scene"]["cameras"]:
+        scene_camera_cfg = configs.scene_cfg.get_camera_cfg(
+            sim_cfg["camera"].copy(),
+            get_camera_pose(cam),
+            event_camera=sim_cfg["event_camera"],
+            event_threshold=sim_cfg["event_threshold"],
+            event_source=sim_cfg["event_source"],
+            event_warp=sim_cfg["event_warp"] > 1,
+        )
+        scene_camera_cfg.update_latest_camera_pose = sim_cfg["event_dynamic_gt"]
         scene_cfg = configs.scene_cfg.add_scene_camera(
             scene_cfg,
             cam["name"],
-            configs.scene_cfg.get_camera_cfg(
-                sim_cfg["camera"].copy(),
-                get_camera_pose(cam),
-                event_camera=sim_cfg["event_camera"],
-                event_threshold=sim_cfg["event_threshold"],
-                event_source=sim_cfg["event_source"],
-                event_warp=sim_cfg["event_warp"] > 1,
-            ),
+            scene_camera_cfg,
         )
     return scene_cfg
 
@@ -1073,7 +1075,9 @@ def simulate(sim_cfg, task, robot, scene_dir, object_metadata, seed):
             env.unwrapped.scene.sensors,
             ["rgb", "depth", "seg"],
             geometry_cameras=(
-                ["wrist_cam"] if sim_cfg["event_dynamic_gt"] else []
+                ["wrist_cam", "opst_cam", "side_cam"]
+                if sim_cfg["event_dynamic_gt"]
+                else []
             ),
         )
         env.step(next_state["action"])

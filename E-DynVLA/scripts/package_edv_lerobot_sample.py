@@ -30,7 +30,7 @@ FPS = 25
 WIDTH = 480
 HEIGHT = 360
 AEDAT_PACKET_EVENTS = 100_000
-MOTION_SUPPORT_CAMERA = "wrist_cam"
+MOTION_SUPPORT_CAMERAS = CAMERAS
 
 
 def parse_args() -> argparse.Namespace:
@@ -369,8 +369,10 @@ def write_dataset_info(root: Path) -> None:
         },
         "motion_separation_support": {
             "container": "HDF5",
-            "camera": MOTION_SUPPORT_CAMERA,
-            "path": f"support/{MOTION_SUPPORT_CAMERA}_motion_support.h5",
+            "cameras": {
+                camera: f"support/{camera}_motion_support.h5"
+                for camera in MOTION_SUPPORT_CAMERAS
+            },
             "fields": [
                 "depth_metric",
                 "motion_vectors",
@@ -382,8 +384,8 @@ def write_dataset_info(root: Path) -> None:
         },
         "samples": samples,
         "total_samples": len(samples),
-        "success_samples": sum(s["split"] == "success" for s in samples),
-        "failure_samples": sum(s["split"] == "failure" for s in samples),
+        "success_samples": sum(s["success"] is True for s in samples),
+        "failure_samples": sum(s["success"] is False for s in samples),
         "updated_utc": datetime.now(timezone.utc).isoformat(),
     }
     temp_path = root / f".dataset_info.{os.getpid()}.json.tmp"
@@ -420,13 +422,16 @@ def main() -> None:
         source_event = require_one(
             (staging / "events").glob("env*_ep*.h5"), "event HDF5"
         )
+        with source_json.open(encoding="utf-8") as stream:
+            simulation_config = json.load(stream)
+
         generation_manifest_path = staging / "generation_manifest.json"
         generation_manifest = (
             json.loads(generation_manifest_path.read_text(encoding="utf-8"))
             if generation_manifest_path.is_file()
             else {
-                "initial_condition_source": "csv",
-                "seed": None,
+                "initial_condition_source": "recovered_from_episode_json",
+                "seed": simulation_config.get("seed"),
             }
         )
         csv_row = read_csv_row(args.csv, args.row) if args.csv is not None else None
@@ -435,9 +440,6 @@ def main() -> None:
             if csv_row is not None
             else int(generation_manifest["seed"])
         )
-
-        with source_json.open(encoding="utf-8") as stream:
-            simulation_config = json.load(stream)
 
         with h5py.File(source_h5, "r") as source:
             required = {
@@ -573,17 +575,17 @@ def main() -> None:
             )
             event_paths[camera] = event_path
 
-        support_path = (
-            temp_sample
-            / "support"
-            / f"{MOTION_SUPPORT_CAMERA}_motion_support.h5"
-        )
-        support_metadata = write_motion_support_h5(
-            source_h5,
-            support_path,
-            MOTION_SUPPORT_CAMERA,
-            time_origin_s,
-        )
+        support_paths = {}
+        support_metadata = {}
+        for camera in MOTION_SUPPORT_CAMERAS:
+            support_path = temp_sample / "support" / f"{camera}_motion_support.h5"
+            support_metadata[camera] = write_motion_support_h5(
+                source_h5,
+                support_path,
+                camera,
+                time_origin_s,
+            )
+            support_paths[camera] = support_path
 
         selected_assets = {}
         for name in ("house", "object", "container"):
@@ -609,7 +611,11 @@ def main() -> None:
         files = {
             parquet_path.relative_to(temp_sample).as_posix(): sha256_file(parquet_path)
         }
-        for path in (*video_paths.values(), *event_paths.values(), support_path):
+        for path in (
+            *video_paths.values(),
+            *event_paths.values(),
+            *support_paths.values(),
+        ):
             files[path.relative_to(temp_sample).as_posix()] = sha256_file(path)
 
         reproduction_env = ""
@@ -675,11 +681,18 @@ def main() -> None:
             },
             "motion_separation_support": {
                 "format": "HDF5",
-                "path": support_path.relative_to(temp_sample).as_posix(),
                 "used_for": (
                     "online/static-dynamic event separation from raw events"
                 ),
-                **support_metadata,
+                "cameras": {
+                    camera: {
+                        "path": support_paths[camera]
+                        .relative_to(temp_sample)
+                        .as_posix(),
+                        **support_metadata[camera],
+                    }
+                    for camera in MOTION_SUPPORT_CAMERAS
+                },
             },
             "time_alignment": {
                 "common_origin_isaac_time_s": time_origin_s,

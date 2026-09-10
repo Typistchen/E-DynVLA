@@ -17,12 +17,11 @@ DOM_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REPO_ROOT=$(cd "$DOM_ROOT/.." && pwd)
 EVENT_ROOT="${V2E_VLA_ROOT:-$REPO_ROOT/V2E-VLA}"
 ASSET_ROOT="$SCRATCH_ROOT/dataset/dom_assets"
-DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
+DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV_Support}"
 TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"
-GENERATOR_REVISION=edv-v4-hybrid-dom-stratified-aedat4-motion-support-v1
+GENERATOR_REVISION=edv-v4-hybrid-dom-stratified-aedat4-motion-support-v2
 SAMPLER=${EDV_SAMPLER:-dom_stratified}
 SEED_BASE=${EDV_SEED_BASE:-42}
-KEEP_FAILURES=${EDV_KEEP_FAILURES:-1}
 
 export XDG_CACHE_HOME="$SCRATCH_ROOT/environment/cache"
 export PIP_CACHE_DIR="$SCRATCH_ROOT/environment/cache/pip"
@@ -91,13 +90,7 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
     --event-warp 4 \
     --event-source hdr \
     --device "$PHYSICAL_DEVICE" \
-    --sample-index "$row" \
-    --split-by-outcome
-
-  if [[ "$KEEP_FAILURES" == "0" && -d "$DATASET_ROOT/failure/$sample_name" ]]; then
-    rm -rf -- "$DATASET_ROOT/failure/$sample_name"
-    echo "[EDV] discarded failed sample: $sample_name"
-  fi
+    --sample-index "$row"
 
   cleanup_staging
   trap - EXIT

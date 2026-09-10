@@ -227,6 +227,17 @@ def main() -> None:
         )
         object_size = sim._get_object_sizes(str(args.object_dir), [category])[object_file]
         upstream_object_states = sim._get_object_states
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        generation_manifest_path = args.output_dir / "generation_manifest.json"
+
+        def persist_generation_manifest() -> None:
+            with generation_manifest_path.open("w", encoding="utf-8") as stream:
+                json.dump(
+                    generation_manifest,
+                    stream,
+                    ensure_ascii=False,
+                    indent=2,
+                )
 
         def fixed_object_states(
             sim_cfg, robot_pose, table_bbox, object_metadata, robot_reach_dist
@@ -276,6 +287,7 @@ def main() -> None:
                         "robot_quaternion_wxyz": np.asarray(robot_pose["quat"]).tolist(),
                     }
                 )
+                persist_generation_manifest()
                 return states
 
             # Legacy CSV/safe mode: keep DOM's seeded container placement while
@@ -308,7 +320,6 @@ def main() -> None:
             return states
 
         sim._get_object_states = fixed_object_states
-        args.output_dir.mkdir(parents=True, exist_ok=True)
         if not args.random_dom_init:
             generation_manifest.update(
                 {
@@ -326,6 +337,7 @@ def main() -> None:
                     ),
                 }
             )
+        persist_generation_manifest()
         event_output_dir = args.output_dir / "events"
         event_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -368,10 +380,7 @@ def main() -> None:
             raise RuntimeError(
                 "DOM returned without saving an episode; inspect the simulator log"
             )
-        with (args.output_dir / "generation_manifest.json").open(
-            "w", encoding="utf-8"
-        ) as stream:
-            json.dump(generation_manifest, stream, ensure_ascii=False, indent=2)
+        persist_generation_manifest()
         source_episode = row["episode_index"] if row is not None else "none"
         print(
             f"[done] source_episode_index={source_episode} seed={seed} "
