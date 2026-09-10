@@ -17,7 +17,6 @@ import pyarrow.parquet as pq
 
 
 CAMERAS = ("wrist_cam", "opst_cam", "side_cam")
-MOTION_SUPPORT_CAMERA = "wrist_cam"
 EXPECTED_SCHEMA = pa.schema(
     [
         ("action", pa.list_(pa.float32())),
@@ -75,7 +74,12 @@ def validate_aedat(path: Path, expected_count: int) -> dict:
     }
 
 
-def validate_motion_support(path: Path, frame_count: int) -> dict:
+def validate_motion_support(
+    path: Path,
+    frame_count: int,
+    expected_timestamps: np.ndarray,
+    camera: str,
+) -> dict:
     import h5py
 
     expected = {
@@ -86,6 +90,8 @@ def validate_motion_support(path: Path, frame_count: int) -> dict:
         "timestamp": (frame_count,),
     }
     with h5py.File(path, "r", libver="latest") as handle:
+        if handle.attrs.get("camera") != camera:
+            raise RuntimeError(f"Bad camera attribute in {path}")
         found = {}
         for key, shape in expected.items():
             if key not in handle or tuple(handle[key].shape) != shape:
@@ -96,7 +102,14 @@ def validate_motion_support(path: Path, frame_count: int) -> dict:
             found[key] = {
                 "shape": list(handle[key].shape),
                 "dtype": str(handle[key].dtype),
+                "chunks": list(handle[key].chunks) if handle[key].chunks else None,
+                "compression": handle[key].compression,
             }
+        if not np.allclose(handle["timestamp"][:], expected_timestamps, atol=1e-9):
+            raise RuntimeError(f"Support timestamps do not match Parquet in {path}")
+        for key in ("depth_metric", "motion_vectors"):
+            if handle[key].dtype != np.float16 or handle[key].compression != "lzf":
+                raise RuntimeError(f"Bad storage layout for {key} in {path}")
     return {"fields": found, "size_bytes": path.stat().st_size}
 
 
@@ -167,10 +180,15 @@ def main() -> None:
             )
         support_info = reproduction.get("motion_separation_support")
         if support_info is not None:
-            support = validate_motion_support(
-                sample / support_info["path"],
-                frame_count,
-            )
+            support = {
+                camera: validate_motion_support(
+                    sample / support_info["cameras"][camera]["path"],
+                    frame_count,
+                    timestamps,
+                    camera,
+                )
+                for camera in CAMERAS
+            }
         else:
             support = None
 

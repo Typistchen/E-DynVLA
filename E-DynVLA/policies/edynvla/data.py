@@ -1,8 +1,9 @@
-"""DOM + separated-event data adapter used by E-DynVLA.
+"""DOM/EDV event data adapters used by E-DynVLA.
 
-The adapter reads the HDF5 files produced by
-``separate_dynamic_static_events.py`` and aligns event windows to DOM frames.
-It keeps simulator-only segmentation and object velocity out of model inputs.
+The adapters align event windows to RGB observations and expose two streams to
+the policy: static-world-consistent events and independently dynamic events.
+Raw event files are kept raw on disk; when confidence fields are missing, a
+motion separator can be supplied to create the two streams at read time.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 from torch.nn import functional as F
+
+from policies.edynvla.motion_separation import RawEventMotionSeparator
 
 
 STATIC_EVENT_KEY = "observation.events.static"
@@ -37,6 +40,7 @@ class EventWindowConfig:
     clip_count: float = 8.0
     future_steps: int = 10
     future_grid_size: tuple[int, int] = (12, 16)
+    event_code_root: str | None = None
 
     @property
     def bin_seconds(self) -> float:
@@ -88,9 +92,16 @@ def voxelize_weighted_events(
 
 
 class SeparatedEventWindowReader:
-    """Lazy aligned reader for one separated-event HDF5 episode."""
+    """Lazy aligned reader for stored-q or raw HDF5 event episodes."""
 
-    def __init__(self, filename: str | Path, config: EventWindowConfig) -> None:
+    def __init__(
+        self,
+        filename: str | Path,
+        config: EventWindowConfig,
+        *,
+        support_h5: str | Path | None = None,
+        rgb_frames: np.ndarray | None = None,
+    ) -> None:
         try:
             import h5py
         except ImportError as exc:  # pragma: no cover - environment-specific
@@ -100,6 +111,12 @@ class SeparatedEventWindowReader:
         self.config = config
         self._file = h5py.File(self.filename, "r", libver="latest")
         self._group = self._file[f"DVS/{config.sensor}"]
+        self._support_file = (
+            h5py.File(support_h5, "r", libver="latest")
+            if support_h5 is not None
+            else None
+        )
+        self._rgb_frames = rgb_frames
         # One timestamp array per open episode keeps repeated searchsorted calls
         # fast. Dataset workers should each construct their own reader.
         self._timestamps = np.asarray(self._group["t"], dtype=np.float64)
@@ -109,11 +126,30 @@ class SeparatedEventWindowReader:
                 self._timestamps[0] if len(self._timestamps) else 0.0,
             )
         )
+        self._has_stored_confidence = all(
+            key in self._group for key in ("q_static", "q_dynamic", "q_illumination")
+        )
+        self._motion_separator = None
+        if not self._has_stored_confidence:
+            if self._support_file is None or self._rgb_frames is None:
+                raise RuntimeError(
+                    f"{self.filename} stores raw events only. Provide support_h5 "
+                    "and rgb_frames to derive static/dynamic event inputs."
+                )
+            self._motion_separator = RawEventMotionSeparator(
+                support_h5=self._support_file,
+                event_code_root=config.event_code_root,
+                source_size=config.source_size,
+                output_size=config.output_size,
+            )
 
     def close(self) -> None:
         if self._file is not None:
             self._file.close()
             self._file = None
+        if self._support_file is not None:
+            self._support_file.close()
+            self._support_file = None
 
     def __enter__(self) -> "SeparatedEventWindowReader":
         return self
@@ -129,6 +165,24 @@ class SeparatedEventWindowReader:
             self._timestamps, [start_time, end_time], side="left"
         )
         arrays = self._read_slice(int(lo), int(hi))
+        if not self._has_stored_confidence:
+            static, dynamic = self._motion_separator.voxelize(
+                x=arrays["x"],
+                y=arrays["y"],
+                t=arrays["t"],
+                p=arrays["p"],
+                frame_index=frame_index,
+                rgb_frames=self._rgb_frames,
+                start_time=start_time,
+                num_bins=self.config.history_bins,
+                bin_seconds=self.config.bin_seconds,
+                clip_count=self.config.clip_count,
+            )
+            return {
+                STATIC_EVENT_KEY: torch.from_numpy(static),
+                DYNAMIC_EVENT_KEY: torch.from_numpy(dynamic),
+                FUTURE_EVENT_KEY: self._future_activity(frame_index, end_time),
+            }
         illumination_keep = np.clip(1.0 - arrays["q_illumination"], 0.0, 1.0)
         common = dict(
             x=arrays["x"],
@@ -151,15 +205,32 @@ class SeparatedEventWindowReader:
         return {
             STATIC_EVENT_KEY: static,
             DYNAMIC_EVENT_KEY: dynamic,
-            FUTURE_EVENT_KEY: self._future_activity(end_time),
+            FUTURE_EVENT_KEY: self._future_activity(frame_index, end_time),
         }
 
-    def _future_activity(self, start_time: float) -> torch.Tensor:
+    def _future_activity(self, frame_index: int, start_time: float) -> torch.Tensor:
         end_time = start_time + self.config.future_steps * self.config.bin_seconds
         lo, hi = np.searchsorted(
             self._timestamps, [start_time, end_time], side="left"
         )
         arrays = self._read_slice(int(lo), int(hi))
+        if not self._has_stored_confidence:
+            map_index = min(frame_index + 1, len(self._rgb_frames) - 1)
+            static, dynamic = self._motion_separator.voxelize(
+                x=arrays["x"],
+                y=arrays["y"],
+                t=arrays["t"],
+                p=arrays["p"],
+                frame_index=map_index,
+                rgb_frames=self._rgb_frames,
+                start_time=start_time,
+                num_bins=self.config.future_steps,
+                bin_seconds=self.config.bin_seconds,
+                clip_count=1.0,
+            )
+            return torch.from_numpy(
+                np.concatenate([static, dynamic], axis=1)
+            ).gt(0).float()
         illumination_keep = np.clip(1.0 - arrays["q_illumination"], 0.0, 1.0)
         grid_size = self.config.future_grid_size
         static = voxelize_weighted_events(
@@ -191,7 +262,9 @@ class SeparatedEventWindowReader:
         return torch.cat([static, dynamic], dim=1).gt(0).float()
 
     def _read_slice(self, lo: int, hi: int) -> dict[str, np.ndarray]:
-        keys = ("x", "y", "t", "p", "q_static", "q_dynamic", "q_illumination")
+        keys = ["x", "y", "t", "p"]
+        if self._has_stored_confidence:
+            keys.extend(("q_static", "q_dynamic", "q_illumination"))
         return {key: np.asarray(self._group[key][lo:hi]) for key in keys}
 
 

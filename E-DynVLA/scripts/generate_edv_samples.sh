@@ -4,6 +4,7 @@ set -euo pipefail
 START_ROW=${1:-0}
 COUNT=${2:-1}
 DEVICE=${3:-cuda:2}
+PHYSICAL_DEVICE=${EDV_PHYSICAL_DEVICE:-$DEVICE}
 
 if (( START_ROW < 0 || COUNT < 1 )); then
   echo "Usage: $0 [start_row>=0] [count>=1] [cuda:N]" >&2
@@ -16,9 +17,9 @@ DOM_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REPO_ROOT=$(cd "$DOM_ROOT/.." && pwd)
 EVENT_ROOT="${V2E_VLA_ROOT:-$REPO_ROOT/V2E-VLA}"
 ASSET_ROOT="$SCRATCH_ROOT/dataset/dom_assets"
-DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
+DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV_Support}"
 TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"
-GENERATOR_REVISION=edv-v4-hybrid-dom-stratified-aedat4-motion-support-v1
+GENERATOR_REVISION=edv-v4-hybrid-dom-stratified-aedat4-motion-support-v2
 SAMPLER=${EDV_SAMPLER:-dom_stratified}
 SEED_BASE=${EDV_SEED_BASE:-42}
 
@@ -35,9 +36,7 @@ mkdir -p "$DATASET_ROOT" "$TEMP_ROOT"
 
 for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
   sample_name=$(printf 'sample_%06d' "$row")
-  if [[ -e "$DATASET_ROOT/$sample_name" \
-     || -e "$DATASET_ROOT/success/$sample_name" \
-     || -e "$DATASET_ROOT/failure/$sample_name" ]]; then
+  if [[ -e "$DATASET_ROOT/$sample_name" ]]; then
     echo "Refusing to overwrite existing sample index: $sample_name" >&2
     exit 3
   fi
@@ -88,9 +87,9 @@ for (( row=START_ROW; row<START_ROW+COUNT; row++ )); do
     --event-threshold 0.15 \
     --event-warp 4 \
     --event-source hdr \
-    --device "$DEVICE" \
+    --device "$PHYSICAL_DEVICE" \
     --sample-index "$row" \
-    --split-by-outcome
+    --only-success
 
   cleanup_staging
   trap - EXIT
