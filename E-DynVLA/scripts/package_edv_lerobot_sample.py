@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Store samples under success/ or failure/ according to the outcome label",
     )
+    parser.add_argument(
+        "--only-success",
+        action="store_true",
+        help="Discard the temporary sample when the computed outcome is failure",
+    )
     return parser.parse_args()
 
 
@@ -515,6 +520,15 @@ def main() -> None:
             "final_object_z_m": final_object_z,
             "maximum_lift_m": lift_height,
         }
+        if args.only_success and not success:
+            shutil.rmtree(temp_sample)
+            write_dataset_info(root)
+            print(
+                f"[EDV] discarded failed sample: {sample_name} "
+                f"reason={termination_reason}",
+                flush=True,
+            )
+            return
         split_name = "success" if success else "failure"
         final_sample = (
             root / split_name / sample_name

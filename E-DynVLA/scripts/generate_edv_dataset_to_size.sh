@@ -7,7 +7,7 @@ GPU_B=${3:-cuda:3}
 
 SCRATCH_ROOT=/vepfs-cnbj438438cfe4f9/scratch/jiaqi
 DOM_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV}"
+DATASET_ROOT="${EDV_DATASET_ROOT:-$SCRATCH_ROOT/dataset/EDV_Support}"
 LOG_ROOT="$SCRATCH_ROOT/logs/edv_500g"
 TEMP_ROOT="$SCRATCH_ROOT/cache/edv_tmp"
 COUNTER_FILE="$DATASET_ROOT/.next_sample_index"
@@ -15,7 +15,7 @@ COUNTER_LOCK="$DATASET_ROOT/.next_sample_index.lock"
 TARGET_BYTES=$((TARGET_GIB * 1024 * 1024 * 1024))
 MIN_FREE_BYTES=$((100 * 1024 * 1024 * 1024))
 
-mkdir -p "$DATASET_ROOT/success" "$DATASET_ROOT/failure" "$LOG_ROOT" "$TEMP_ROOT"
+mkdir -p "$DATASET_ROOT" "$LOG_ROOT" "$TEMP_ROOT"
 
 # The server root filesystem is small and /tmp may fill during long Isaac Sim
 # runs. Keep Python/Kit temporary files on the large VEPFS scratch volume.
@@ -24,7 +24,7 @@ export TMP="$TEMP_ROOT"
 export TEMP="$TEMP_ROOT"
 
 dataset_bytes() {
-  du -sb "$DATASET_ROOT/success" 2>/dev/null | awk '{print $1 + 0}'
+  du -sb "$DATASET_ROOT" 2>/dev/null | awk '{print $1 + 0}'
 }
 
 initialize_counter() {
@@ -33,7 +33,7 @@ initialize_counter() {
   fi
   local maximum=-1
   local path name index
-  for path in "$DATASET_ROOT"/success/sample_* "$DATASET_ROOT"/failure/sample_*; do
+  for path in "$DATASET_ROOT"/sample_*; do
     [[ -d "$path" ]] || continue
     name=${path##*/}
     index=$((10#${name#sample_}))
