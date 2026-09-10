@@ -88,10 +88,10 @@ def train(cfg):
     test_data_loader = torch.utils.data.DataLoader(
         dataset=test_dataset,
         batch_size=cfg.TRAIN.BATCH_SIZE,
-        num_workers=cfg.CONST.N_WORKERS,
+        num_workers=min(2, cfg.CONST.N_WORKERS),
         pin_memory=cfg.DATASET.PIN_MEMORY,
         sampler=test_sampler,
-        persistent_workers=True,
+        persistent_workers=False,
     )
 
     # Set up the policy

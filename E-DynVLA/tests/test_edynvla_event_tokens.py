@@ -1,7 +1,10 @@
 import numpy as np
 import torch
 
-from policies.edynvla.data import voxelize_weighted_events
+from policies.edynvla.data import (
+    voxelize_weighted_event_pair,
+    voxelize_weighted_events,
+)
 from policies.edynvla.event_tokenizer import SparseEventTokenizer
 from policies.edynvla.event_wam import (
     EventWAMHead,
@@ -30,6 +33,40 @@ def test_weighted_voxelization_preserves_time_polarity_and_weight():
     assert voxels.shape == (2, 2, 16, 16)
     assert voxels[0, 0, 0, 0] == 1.0
     assert voxels[1, 1].sum() == 1.0
+
+
+def test_paired_voxelization_matches_individual_calls():
+    rng = np.random.default_rng(0)
+    n = 5000
+    x = rng.integers(0, 480, n).astype(np.int16)
+    y = rng.integers(0, 360, n).astype(np.int16)
+    t = np.sort(rng.uniform(0.0, 0.08, n)).astype(np.float32)
+    polarity = rng.integers(0, 2, n).astype(np.int8)
+    weight_static = rng.uniform(0.0, 1.0, n).astype(np.float32)
+    weight_dynamic = rng.uniform(0.0, 1.0, n).astype(np.float32)
+    kwargs = dict(
+        x=x,
+        y=y,
+        t=t,
+        polarity=polarity,
+        start_time=0.0,
+        num_bins=8,
+        bin_seconds=0.01,
+        source_size=(360, 480),
+        output_size=(96, 128),
+        clip_count=8.0,
+    )
+    static, dynamic = voxelize_weighted_event_pair(
+        **kwargs,
+        weight_static=weight_static,
+        weight_dynamic=weight_dynamic,
+    )
+    assert torch.equal(
+        static, voxelize_weighted_events(**kwargs, weight=weight_static)
+    )
+    assert torch.equal(
+        dynamic, voxelize_weighted_events(**kwargs, weight=weight_dynamic)
+    )
 
 
 def test_sparse_tokenizer_keeps_static_dynamic_types_and_masks_empty_patches():

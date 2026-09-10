@@ -47,6 +47,59 @@ class EventWindowConfig:
         return self.bin_ms / 1000.0
 
 
+def _event_window_indices(
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray,
+    polarity: np.ndarray,
+    start_time: float,
+    num_bins: int,
+    bin_seconds: float,
+    source_size: tuple[int, int],
+    output_size: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Flat voxel indices and validity mask for one event window."""
+    out_h, out_w = output_size
+    src_h, src_w = source_size
+    time_bin = np.floor(
+        (t.astype(np.float64) - start_time) / bin_seconds
+    ).astype(np.int32)
+    xx = (x.astype(np.int32) * out_w) // src_w
+    yy = (y.astype(np.int32) * out_h) // src_h
+    pp = (polarity > 0).astype(np.int32)
+    # Unsigned views make the negative-value checks branch-free: negative
+    # bins/coordinates wrap to huge uint32 values and fail the upper bound.
+    valid = (
+        (time_bin.view(np.uint32) < np.uint32(num_bins))
+        & (xx.view(np.uint32) < np.uint32(out_w))
+        & (yy.view(np.uint32) < np.uint32(out_h))
+    )
+    flat = ((time_bin * 2 + pp) * out_h + yy) * out_w + xx
+    return flat, valid
+
+
+def _accumulate_voxels(
+    flat: np.ndarray,
+    valid: np.ndarray,
+    weight: np.ndarray,
+    *,
+    num_bins: int,
+    output_size: tuple[int, int],
+    clip_count: float,
+) -> np.ndarray:
+    out_h, out_w = output_size
+    mask = valid & np.isfinite(weight)
+    voxels = np.bincount(
+        flat[mask],
+        weights=np.asarray(weight, dtype=np.float64)[mask],
+        minlength=num_bins * 2 * out_h * out_w,
+    ).astype(np.float32)
+    if clip_count > 0:
+        voxels = np.log1p(np.minimum(voxels, clip_count)) / np.log1p(clip_count)
+    return voxels.reshape(num_bins, 2, out_h, out_w)
+
+
 def voxelize_weighted_events(
     *,
     x: np.ndarray,
@@ -61,34 +114,83 @@ def voxelize_weighted_events(
     output_size: tuple[int, int],
     clip_count: float = 8.0,
 ) -> torch.Tensor:
-    """Convert confidence-weighted events into ``[T,2,H,W]`` log voxels."""
-    out_h, out_w = output_size
-    src_h, src_w = source_size
-    voxels = np.zeros((num_bins, 2, out_h, out_w), dtype=np.float32)
-    if len(t) == 0:
-        return torch.from_numpy(voxels)
+    """Convert confidence-weighted events into ``[T,2,H,W]`` log voxels.
 
-    time_bin = np.floor((t - start_time) / bin_seconds).astype(np.int64)
-    xx = np.floor(x.astype(np.float64) * out_w / src_w).astype(np.int64)
-    yy = np.floor(y.astype(np.float64) * out_h / src_h).astype(np.int64)
-    pp = (polarity > 0).astype(np.int64)
-    valid = (
-        (time_bin >= 0)
-        & (time_bin < num_bins)
-        & (xx >= 0)
-        & (xx < out_w)
-        & (yy >= 0)
-        & (yy < out_h)
-        & np.isfinite(weight)
+    Uses integer index math and ``np.bincount`` accumulation, which is
+    several times faster than the equivalent ``np.add.at`` for the
+    million-event windows produced by high-rate event cameras.
+    """
+    if len(t) == 0:
+        return torch.zeros((num_bins, 2, *output_size), dtype=torch.float32)
+    flat, valid = _event_window_indices(
+        x=x,
+        y=y,
+        t=t,
+        polarity=polarity,
+        start_time=start_time,
+        num_bins=num_bins,
+        bin_seconds=bin_seconds,
+        source_size=source_size,
+        output_size=output_size,
     )
-    np.add.at(
-        voxels,
-        (time_bin[valid], pp[valid], yy[valid], xx[valid]),
-        weight[valid].astype(np.float32),
+    voxels = _accumulate_voxels(
+        flat,
+        valid,
+        weight,
+        num_bins=num_bins,
+        output_size=output_size,
+        clip_count=clip_count,
     )
-    if clip_count > 0:
-        voxels = np.log1p(np.minimum(voxels, clip_count)) / np.log1p(clip_count)
     return torch.from_numpy(voxels)
+
+
+def voxelize_weighted_event_pair(
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray,
+    polarity: np.ndarray,
+    weight_static: np.ndarray,
+    weight_dynamic: np.ndarray,
+    start_time: float,
+    num_bins: int,
+    bin_seconds: float,
+    source_size: tuple[int, int],
+    output_size: tuple[int, int],
+    clip_count: float = 8.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Voxelize two weightings of the same event window with shared indexing."""
+    if len(t) == 0:
+        zeros = torch.zeros((num_bins, 2, *output_size), dtype=torch.float32)
+        return zeros, zeros.clone()
+    flat, valid = _event_window_indices(
+        x=x,
+        y=y,
+        t=t,
+        polarity=polarity,
+        start_time=start_time,
+        num_bins=num_bins,
+        bin_seconds=bin_seconds,
+        source_size=source_size,
+        output_size=output_size,
+    )
+    static = _accumulate_voxels(
+        flat,
+        valid,
+        weight_static,
+        num_bins=num_bins,
+        output_size=output_size,
+        clip_count=clip_count,
+    )
+    dynamic = _accumulate_voxels(
+        flat,
+        valid,
+        weight_dynamic,
+        num_bins=num_bins,
+        output_size=output_size,
+        clip_count=clip_count,
+    )
+    return torch.from_numpy(static), torch.from_numpy(dynamic)
 
 
 class SeparatedEventWindowReader:
@@ -117,15 +219,27 @@ class SeparatedEventWindowReader:
             else None
         )
         self._rgb_frames = rgb_frames
-        # One timestamp array per open episode keeps repeated searchsorted calls
-        # fast. Dataset workers should each construct their own reader. The
-        # on-disk dtype is preserved (float64 for stored DOM H5s, float32 for
-        # converted AEDAT4 caches) to halve memory for large event counts.
-        self._timestamps = np.asarray(self._group["t"])
+        # Locating an event window only needs a searchsorted on timestamps.
+        # Caches written by EDVSupportDataset carry a coarse ``t_index`` (one
+        # entry per TIME_INDEX_STEP events) so opening a reader does not load
+        # the full, possibly 80M-entry, timestamp array. Legacy files without
+        # the index fall back to the full in-memory array.
+        self._n_events = int(self._group["t"].shape[0])
+        if "t_index" in self._group:
+            self._t_index = np.asarray(self._group["t_index"])
+            self._t_index_step = int(self._group.attrs.get("t_index_step", 1))
+            self._timestamps = None
+        else:
+            self._t_index = None
+            self._t_index_step = 0
+            # The on-disk dtype is preserved (float64 for stored DOM H5s,
+            # float32 for converted AEDAT4 caches) to halve memory for large
+            # event counts.
+            self._timestamps = np.asarray(self._group["t"])
         self.time_origin = float(
             self._file.attrs.get(
                 "event_time_origin_s",
-                self._timestamps[0] if len(self._timestamps) else 0.0,
+                self._group["t"][0] if self._n_events else 0.0,
             )
         )
         self._has_stored_confidence = all(
@@ -160,13 +274,29 @@ class SeparatedEventWindowReader:
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
+    def _window_bounds(self, start_time: float, end_time: float) -> tuple[int, int]:
+        """Event index range [lo, hi) covering ``[start_time, end_time)``."""
+        if self._t_index is None:
+            return (
+                int(np.searchsorted(self._timestamps, start_time, side="left")),
+                int(np.searchsorted(self._timestamps, end_time, side="left")),
+            )
+        step = self._t_index_step
+        coarse_lo = int(np.searchsorted(self._t_index, start_time, side="left"))
+        coarse_hi = int(np.searchsorted(self._t_index, end_time, side="right"))
+        lo = max(0, (coarse_lo - 1) * step)
+        hi = min(self._n_events, (coarse_hi + 1) * step)
+        chunk = np.asarray(self._group["t"][lo:hi])
+        return (
+            lo + int(np.searchsorted(chunk, start_time, side="left")),
+            lo + int(np.searchsorted(chunk, end_time, side="left")),
+        )
+
     def frame(self, frame_index: int) -> dict[str, torch.Tensor]:
         """Read history ending at the timestamp of a DOM frame."""
         end_time = self.time_origin + frame_index / self.config.fps
         start_time = end_time - self.config.history_bins * self.config.bin_seconds
-        lo, hi = np.searchsorted(
-            self._timestamps, [start_time, end_time], side="left"
-        )
+        lo, hi = self._window_bounds(start_time, end_time)
         arrays = self._read_slice(int(lo), int(hi))
         if not self._has_stored_confidence:
             static, dynamic = self._motion_separator.voxelize(
@@ -187,23 +317,19 @@ class SeparatedEventWindowReader:
                 FUTURE_EVENT_KEY: self._future_activity(frame_index, end_time),
             }
         illumination_keep = np.clip(1.0 - arrays["q_illumination"], 0.0, 1.0)
-        common = dict(
+        static, dynamic = voxelize_weighted_event_pair(
             x=arrays["x"],
             y=arrays["y"],
             t=arrays["t"],
             polarity=arrays["p"],
+            weight_static=arrays["q_static"] * illumination_keep,
+            weight_dynamic=arrays["q_dynamic"] * illumination_keep,
             start_time=start_time,
             num_bins=self.config.history_bins,
             bin_seconds=self.config.bin_seconds,
             source_size=self.config.source_size,
             output_size=self.config.output_size,
             clip_count=self.config.clip_count,
-        )
-        static = voxelize_weighted_events(
-            **common, weight=arrays["q_static"] * illumination_keep
-        )
-        dynamic = voxelize_weighted_events(
-            **common, weight=arrays["q_dynamic"] * illumination_keep
         )
         return {
             STATIC_EVENT_KEY: static,
@@ -213,9 +339,7 @@ class SeparatedEventWindowReader:
 
     def _future_activity(self, frame_index: int, start_time: float) -> torch.Tensor:
         end_time = start_time + self.config.future_steps * self.config.bin_seconds
-        lo, hi = np.searchsorted(
-            self._timestamps, [start_time, end_time], side="left"
-        )
+        lo, hi = self._window_bounds(start_time, end_time)
         arrays = self._read_slice(int(lo), int(hi))
         if not self._has_stored_confidence:
             map_index = min(frame_index + 1, len(self._rgb_frames) - 1)
@@ -236,31 +360,18 @@ class SeparatedEventWindowReader:
                 np.concatenate([static, dynamic], axis=1)
             ).gt(0).float()
         illumination_keep = np.clip(1.0 - arrays["q_illumination"], 0.0, 1.0)
-        grid_size = self.config.future_grid_size
-        static = voxelize_weighted_events(
+        static, dynamic = voxelize_weighted_event_pair(
             x=arrays["x"],
             y=arrays["y"],
             t=arrays["t"],
             polarity=arrays["p"],
-            weight=arrays["q_static"] * illumination_keep,
+            weight_static=arrays["q_static"] * illumination_keep,
+            weight_dynamic=arrays["q_dynamic"] * illumination_keep,
             start_time=start_time,
             num_bins=self.config.future_steps,
             bin_seconds=self.config.bin_seconds,
             source_size=self.config.source_size,
-            output_size=grid_size,
-            clip_count=1.0,
-        )
-        dynamic = voxelize_weighted_events(
-            x=arrays["x"],
-            y=arrays["y"],
-            t=arrays["t"],
-            polarity=arrays["p"],
-            weight=arrays["q_dynamic"] * illumination_keep,
-            start_time=start_time,
-            num_bins=self.config.future_steps,
-            bin_seconds=self.config.bin_seconds,
-            source_size=self.config.source_size,
-            output_size=grid_size,
+            output_size=self.config.future_grid_size,
             clip_count=1.0,
         )
         return torch.cat([static, dynamic], dim=1).gt(0).float()

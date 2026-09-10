@@ -5,7 +5,11 @@ import numpy as np
 import pytest
 import torch
 
-from policies.edynvla.edv_support import EDVSupportDataset, select_edv_samples
+from policies.edynvla.edv_support import (
+    EDVSupportDataset,
+    event_h5_has_confidence,
+    select_edv_samples,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -135,11 +139,19 @@ class TestEDVSupportDatasetIntegration:
         dataset[1]
         assert len(dataset._bundles) == bundles_after_first
 
-    def test_event_cache_is_reused(self, dataset):
+    def test_event_cache_stores_separation_confidences(self, dataset):
         cache_dir = dataset.event_cache_root
-        cache_files_before = set(cache_dir.glob("*.h5"))
-        assert len(cache_files_before) > 0
         sample_index = dataset.samples[0]["sample_index"]
         sensor = dataset.event_config.sensor
         expected = cache_dir / f"sample_{sample_index:06d}_{sensor}.h5"
-        assert expected in cache_files_before
+        assert expected.is_file()
+        assert event_h5_has_confidence(expected, sensor)
+
+    def test_bundle_uses_stored_q_fast_path(self, dataset):
+        sample = dataset.samples[0]
+        bundle = dataset._get_sample_bundle(sample)
+        # Stored-q readers keep no in-memory timestamp array and no separator.
+        assert bundle.reader._timestamps is None
+        assert bundle.reader._t_index is not None
+        assert bundle.reader._motion_separator is None
+        assert set(bundle.captures) == set(dataset.cameras)

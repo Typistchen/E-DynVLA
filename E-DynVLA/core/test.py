@@ -44,7 +44,7 @@ def test(cfg, test_data_loader=None, policy=None):
         test_data_loader = torch.utils.data.DataLoader(
             dataset=test_dataset,
             batch_size=1,
-            num_workers=cfg.CONST.N_WORKERS,
+            num_workers=min(2, cfg.CONST.N_WORKERS),
             pin_memory=cfg.DATASET.PIN_MEMORY,
             shuffle=False,
         )

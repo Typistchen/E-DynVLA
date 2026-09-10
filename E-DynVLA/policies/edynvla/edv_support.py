@@ -35,6 +35,25 @@ from policies.edynvla.data import (
 
 logger = logging.getLogger(__name__)
 
+# Coarse timestamp index stride: the reader binary-searches this tiny array
+# instead of loading the full (possibly 80M+ entry) timestamp dataset.
+TIME_INDEX_STEP = 16384
+
+
+def _write_event_group(output, sensor: str, events: dict) -> None:
+    group = output.create_group(f"DVS/{sensor}")
+    group.create_dataset("x", data=events["x"])
+    group.create_dataset("y", data=events["y"])
+    group.create_dataset("t", data=events["t"])
+    group.create_dataset("p", data=events["p"])
+    t = events["t"]
+    if len(t) > TIME_INDEX_STEP:
+        group.create_dataset("t_index", data=t[::TIME_INDEX_STEP])
+        group.attrs["t_index_step"] = TIME_INDEX_STEP
+    for key in ("q_static", "q_dynamic", "q_illumination"):
+        if key in events:
+            group.create_dataset(key, data=events[key])
+
 
 def read_aedat4_events(path: str | Path, expected_count: int | None = None) -> dict:
     """Read one AEDAT4 event file into seconds-based numpy arrays."""
@@ -122,11 +141,91 @@ def ensure_event_h5(
             output.attrs["event_time_origin_s"] = float(time_origin_s)
             output.attrs["sensor"] = sensor
             output.attrs["source_events"] = str(Path(aedat4_path).resolve())
-            group = output.create_group(f"DVS/{sensor}")
-            group.create_dataset("x", data=events["x"])
-            group.create_dataset("y", data=events["y"])
-            group.create_dataset("t", data=events["t"])
-            group.create_dataset("p", data=events["p"])
+            _write_event_group(output, sensor, events)
+        os.replace(tmp_path, cache_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return cache_path
+
+
+def event_h5_has_confidence(path: str | Path, sensor: str) -> bool:
+    """True when the cached event H5 stores per-event separation confidences."""
+    import h5py
+
+    path = Path(path)
+    if not path.is_file():
+        return False
+    with h5py.File(path, "r") as handle:
+        group = handle.get(f"DVS/{sensor}")
+        return group is not None and "q_static" in group
+
+
+def ensure_separated_event_h5(
+    aedat4_path: str | Path,
+    cache_path: str | Path,
+    *,
+    sensor: str,
+    time_origin_s: float,
+    expected_count: int | None,
+    support_h5_path: str | Path,
+    rgb_frames: np.ndarray,
+    event_code_root: str | Path | None,
+    source_size: tuple[int, int],
+    output_size: tuple[int, int],
+    fps: float,
+) -> Path:
+    """Build (or upgrade) an event-H5 cache that stores q_static/q_dynamic.
+
+    The separation is expensive, so it runs exactly once per sample and the
+    per-event confidences are persisted. Training then takes the stored-q
+    fast path: no video decoding and no online separation at read time.
+    """
+    import h5py
+
+    from policies.edynvla.motion_separation import RawEventMotionSeparator
+
+    cache_path = Path(cache_path)
+    if event_h5_has_confidence(cache_path, sensor):
+        return cache_path
+    ensure_event_h5(
+        aedat4_path,
+        cache_path,
+        sensor=sensor,
+        time_origin_s=time_origin_s,
+        expected_count=expected_count,
+    )
+    with h5py.File(cache_path, "r") as handle:
+        group = handle[f"DVS/{sensor}"]
+        events = {
+            key: np.asarray(group[key]) for key in ("x", "y", "t", "p")
+        }
+    with h5py.File(support_h5_path, "r") as support:
+        separator = RawEventMotionSeparator(
+            support_h5=support,
+            event_code_root=event_code_root,
+            source_size=source_size,
+            output_size=output_size,
+        )
+        q_static, q_dynamic, q_illumination = separator.label_events(
+            x=events["x"],
+            y=events["y"],
+            t=events["t"],
+            rgb_frames=rgb_frames,
+            start_time=float(time_origin_s),
+            fps=float(fps),
+        )
+    events["q_static"] = q_static
+    events["q_dynamic"] = q_dynamic
+    events["q_illumination"] = q_illumination
+    tmp_path = cache_path.with_suffix(cache_path.suffix + f".tmp{os.getpid()}")
+    try:
+        with h5py.File(tmp_path, "w", libver="latest") as output:
+            output.attrs["event_time_origin_s"] = float(time_origin_s)
+            output.attrs["sensor"] = sensor
+            output.attrs["source_events"] = str(Path(aedat4_path).resolve())
+            output.attrs["separation"] = "stored_q"
+            _write_event_group(output, sensor, events)
         os.replace(tmp_path, cache_path)
     finally:
         if tmp_path.exists():
@@ -197,7 +296,7 @@ def select_edv_samples(
 
 
 class _SampleBundle:
-    """Open per-sample resources: event reader + non-sensor video capture."""
+    """Open per-sample resources: event reader + one video capture per camera."""
 
     def __init__(self, reader: SeparatedEventWindowReader, captures: dict) -> None:
         self.reader = reader
@@ -361,18 +460,51 @@ class EDVSupportDataset(torch.utils.data.Dataset):
             self._instructions[key] = f"Pick up the {category}."
         return self._instructions[key]
 
-    def _ensure_event_h5(self, sample: dict) -> Path:
+    def _ensure_event_h5(self, sample: dict) -> tuple[Path, bool]:
+        """Return the event-H5 cache path and whether it stores confidences.
+
+        The separation runs once per sample and is persisted, so training
+        reads the stored-q fast path (no video decode, no online separation).
+        """
         sensor = self.event_config.sensor
-        aedat4_path = self._sample_dir(sample) / "events" / f"{sensor}.aedat4"
+        sample_dir = self._sample_dir(sample)
+        aedat4_path = sample_dir / "events" / f"{sensor}.aedat4"
         cache_path = self.event_cache_root / f"sample_{sample['sample_index']:06d}_{sensor}.h5"
         timestamps = self._load_parquet(sample)["timestamp"]
-        return ensure_event_h5(
+        time_origin_s = float(timestamps[0]) if len(timestamps) else 0.0
+        expected_count = sample.get("event_counts", {}).get(sensor)
+        if event_h5_has_confidence(cache_path, sensor):
+            return cache_path, True
+        support_h5 = sample_dir / "support" / f"{sensor}_motion_support.h5"
+        can_separate = (
+            self.event_config.event_code_root is not None
+            and support_h5.is_file()
+            and (aedat4_path.is_file() or cache_path.is_file())
+        )
+        if not can_separate:
+            ensure_event_h5(
+                aedat4_path,
+                cache_path,
+                sensor=sensor,
+                time_origin_s=time_origin_s,
+                expected_count=expected_count,
+            )
+            return cache_path, False
+        rgb_frames = decode_video(sample_dir / "rgb" / f"{sensor}.mp4")
+        ensure_separated_event_h5(
             aedat4_path,
             cache_path,
             sensor=sensor,
-            time_origin_s=float(timestamps[0]) if len(timestamps) else 0.0,
-            expected_count=sample.get("event_counts", {}).get(sensor),
+            time_origin_s=time_origin_s,
+            expected_count=expected_count,
+            support_h5_path=support_h5,
+            rgb_frames=rgb_frames,
+            event_code_root=self.event_config.event_code_root,
+            source_size=self.event_config.source_size,
+            output_size=self.event_config.output_size,
+            fps=self.event_config.fps,
         )
+        return cache_path, True
 
     def _get_sample_bundle(self, sample: dict) -> _SampleBundle:
         key = sample["sample_index"]
@@ -380,27 +512,29 @@ class EDVSupportDataset(torch.utils.data.Dataset):
             self._bundles.move_to_end(key)
             return self._bundles[key]
 
+        try:
+            import cv2
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError("opencv-python is required for EDV RGB videos") from exc
+
         sensor = self.event_config.sensor
-        event_h5 = self._ensure_event_h5(sample)
-        wrist_frames = decode_video(self._sample_dir(sample) / "rgb" / f"{sensor}.mp4")
-        support_h5 = self._sample_dir(sample) / "support" / f"{sensor}_motion_support.h5"
-        reader = SeparatedEventWindowReader(
-            event_h5,
-            self.event_config,
-            support_h5=support_h5,
-            rgb_frames=wrist_frames,
-        )
-        captures = {}
-        for camera in self.cameras:
-            if camera == sensor:
-                continue
-            try:
-                import cv2
-            except ImportError as exc:  # pragma: no cover
-                raise ImportError("opencv-python is required for EDV RGB videos") from exc
-            captures[camera] = cv2.VideoCapture(
-                str(self._sample_dir(sample) / "rgb" / f"{camera}.mp4")
+        sample_dir = self._sample_dir(sample)
+        event_h5, separated = self._ensure_event_h5(sample)
+        if separated:
+            reader = SeparatedEventWindowReader(event_h5, self.event_config)
+        else:
+            wrist_frames = decode_video(sample_dir / "rgb" / f"{sensor}.mp4")
+            support_h5 = sample_dir / "support" / f"{sensor}_motion_support.h5"
+            reader = SeparatedEventWindowReader(
+                event_h5,
+                self.event_config,
+                support_h5=support_h5,
+                rgb_frames=wrist_frames,
             )
+        captures = {
+            camera: cv2.VideoCapture(str(sample_dir / "rgb" / f"{camera}.mp4"))
+            for camera in self.cameras
+        }
         bundle = _SampleBundle(reader=reader, captures=captures)
         self._bundles[key] = bundle
         while len(self._bundles) > self.max_open_samples:
@@ -409,10 +543,6 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         return bundle
 
     def _video_frame(self, bundle: _SampleBundle, camera: str, frame_index: int) -> np.ndarray:
-        sensor = self.event_config.sensor
-        if camera == sensor:
-            frames = bundle.reader._rgb_frames
-            return frames[min(frame_index, len(frames) - 1)].copy()
         import cv2
 
         capture = bundle.captures[camera]

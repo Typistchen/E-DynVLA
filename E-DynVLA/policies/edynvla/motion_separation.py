@@ -149,6 +149,46 @@ class RawEventMotionSeparator:
             assume_valid=False,
         )
 
+    def label_events(
+        self,
+        *,
+        x,
+        y,
+        t,
+        rgb_frames: np.ndarray,
+        start_time: float,
+        fps: float,
+    ):
+        """Sample per-event static/dynamic/illumination confidences.
+
+        Runs the streaming separator once per observed frame and returns
+        float16 confidence arrays aligned with the event order, so the result
+        can be stored next to the raw events and reused without recomputing
+        the separation at read time.
+        """
+        x = np.asarray(x)
+        y = np.asarray(y)
+        t = np.asarray(t)
+        n_events = len(t)
+        q_static = np.zeros(n_events, np.float16)
+        q_dynamic = np.zeros(n_events, np.float16)
+        q_illumination = np.zeros(n_events, np.float16)
+        if n_events == 0:
+            return q_static, q_dynamic, q_illumination
+
+        height, width = rgb_frames.shape[1], rgb_frames.shape[2]
+        frame_index = np.floor((t - start_time) * fps).astype(np.int64)
+        frame_index = np.clip(frame_index, 0, len(rgb_frames) - 1)
+        x_clipped = np.clip(x, 0, width - 1)
+        y_clipped = np.clip(y, 0, height - 1)
+        for frame in np.unique(frame_index):
+            maps = self.confidence_maps(int(frame), rgb_frames)
+            selected = frame_index == frame
+            q_static[selected] = maps["q_static"][y_clipped[selected], x_clipped[selected]]
+            q_dynamic[selected] = maps["q_dynamic"][y_clipped[selected], x_clipped[selected]]
+            q_illumination[selected] = maps["q_illumination"][y_clipped[selected], x_clipped[selected]]
+        return q_static, q_dynamic, q_illumination
+
     def _neutral_maps(self, frame_index: int) -> dict[str, np.ndarray]:
         depth = np.asarray(self.support_h5["depth_metric"][frame_index]).squeeze()
         shape = depth.shape
