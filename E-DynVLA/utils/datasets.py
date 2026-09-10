@@ -60,6 +60,9 @@ def get_dataset(
             for key in (required_features or [])
             if key.startswith("observation.images.")
         ) or ("opst_cam", "wrist_cam")
+        observation_deltas = (
+            delta_timestamps.get("observation") if delta_timestamps else None
+        )
         return EDVSupportDataset(
             edv_support_root,
             split=split,
@@ -76,6 +79,7 @@ def get_dataset(
             event_sensor=event_sensor,
             delta_action=delta_action,
             image_transforms=image_transforms,
+            observation_deltas=observation_deltas,
             test_every=edv_test_every,
             exclude_failures=edv_exclude_failures,
             event_cache_root=edv_cache_root,
@@ -121,7 +125,7 @@ def get_edv_dataset_kwargs(cfg) -> dict:
     """Resolve the EDV-Support dataset kwargs from cfg / env / defaults."""
     event_code_root = cfg.DATASET.get("V2E_VLA_ROOT") or os.getenv("V2E_VLA_ROOT")
     if event_code_root is None:
-        default_root = pathlib.Path(__file__).resolve().parents[1] / "V2E-VLA"
+        default_root = pathlib.Path(__file__).resolve().parents[2] / "V2E-VLA"
         if (default_root / "scripts" / "separate_dynamic_static_events.py").is_file():
             event_code_root = str(default_root)
     return {

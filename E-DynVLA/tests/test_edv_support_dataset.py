@@ -93,6 +93,7 @@ class TestEDVSupportDatasetIntegration:
             EDV_ROOT,
             split="train",
             event_code_root=REPO_ROOT / "V2E-VLA",
+            observation_deltas=(-2, 0),
         )
 
     def test_sample_contract(self, dataset):
@@ -114,8 +115,8 @@ class TestEDVSupportDatasetIntegration:
             "frame_index",
         }
         assert set(sample.keys()) == expected_keys
-        assert sample["observation.images.opst_cam"].shape == (3, 360, 480)
-        assert sample["observation.images.wrist_cam"].shape == (3, 360, 480)
+        assert sample["observation.images.opst_cam"].shape == (2, 3, 360, 480)
+        assert sample["observation.images.wrist_cam"].shape == (2, 3, 360, 480)
         assert sample["observation.images.opst_cam"].min() >= 0.0
         assert sample["observation.images.opst_cam"].max() <= 1.0
         assert sample["observation.state"].shape == (6,)

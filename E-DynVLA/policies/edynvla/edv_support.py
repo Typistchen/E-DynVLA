@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -223,6 +224,7 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         action_horizon: int = 20,
         delta_action: bool = True,
         image_transforms=None,
+        observation_deltas: tuple[int, ...] | list[int] | None = None,
         test_every: int = 10,
         exclude_failures: bool = True,
         event_cache_root: str | Path | None = None,
@@ -238,6 +240,9 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         self.action_horizon = action_horizon
         self.delta_action = delta_action
         self.image_transforms = image_transforms
+        self.observation_deltas = (
+            tuple(observation_deltas) if observation_deltas else (0,)
+        )
         self.max_open_samples = max_open_samples
 
         if event_config is None:
@@ -247,8 +252,10 @@ class EDVSupportDataset(torch.utils.data.Dataset):
                 event_code_root=event_code_root,
             )
         self.event_config = event_config
-        if self.event_config.event_code_root is None:
-            self.event_config.event_code_root = event_code_root
+        if self.event_config.event_code_root is None and event_code_root is not None:
+            self.event_config = replace(
+                self.event_config, event_code_root=event_code_root
+            )
         self.event_cache_root = Path(
             event_cache_root or self.root / "derived_cache" / "events"
         )
@@ -430,18 +437,25 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         bundle = self._get_sample_bundle(sample)
 
         sample_data: dict[str, torch.Tensor | str] = {}
+        parquet = self._load_parquet(sample)
+        n_frames = len(parquet["action"])
+
         for camera in self.cameras:
-            rgb = self._video_frame(bundle, camera, frame_index)
+            frames = [
+                self._video_frame(
+                    bundle, camera, min(max(frame_index + delta, 0), n_frames - 1)
+                )
+                for delta in self.observation_deltas
+            ]
+            stacked = np.stack(frames)
             sample_data[f"observation.images.{camera}"] = (
-                torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
+                torch.from_numpy(stacked).permute(0, 3, 1, 2).float() / 255.0
             )
 
-        parquet = self._load_parquet(sample)
         sample_data["observation.state"] = torch.from_numpy(
             parquet["state"][frame_index]
         )
 
-        n_frames = len(parquet["action"])
         future_offset = max(
             1,
             round(
@@ -476,8 +490,12 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         sample_data["frame_index"] = torch.tensor(frame_index)
 
         if self.delta_action:
-            action_dim = sample_data["action"].shape[-1] - 1
-            sample_data["action"][..., :action_dim] -= sample_data["observation.state"][:action_dim]
+            sample_data["action"] = torch.from_numpy(
+                self._delta_action(
+                    sample_data["action"].numpy(),
+                    sample_data["observation.state"].numpy(),
+                )
+            )
         if self.image_transforms is not None:
             sample_data = self.image_transforms(
                 sample_data, [*self.camera_keys, FUTURE_RGB_KEY]
@@ -501,6 +519,21 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         parquet = self._load_parquet(self.samples[0])
         return parquet["state"].shape[-1], parquet["action"].shape[-1]
 
+    def _delta_action(self, actions: np.ndarray, state: np.ndarray) -> np.ndarray:
+        """Subtract the current state, wrapping euler angles to [-pi, pi].
+
+        State and action rotations can sit in different 2*pi ranges (for
+        example roll 3.1 vs -6.2), so a plain subtraction produces spurious
+        jumps of up to ~3*pi. The wrapped difference is the physically
+        correct relative rotation for per-step deltas.
+        """
+        actions = actions.copy()
+        action_dim = actions.shape[-1] - 1
+        actions[..., :action_dim] -= state[..., :action_dim]
+        rotation = actions[..., 3:6]
+        actions[..., 3:6] = (rotation + np.pi) % (2 * np.pi) - np.pi
+        return actions
+
     def _compute_stats(self) -> dict[str, dict[str, torch.Tensor]]:
         states = []
         actions = []
@@ -511,8 +544,7 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         state_array = np.concatenate(states, axis=0)
         action_array = np.concatenate(actions, axis=0)
         if self.delta_action:
-            action_array = action_array.copy()
-            action_array[:, :-1] -= state_array
+            action_array = self._delta_action(action_array, state_array)
 
         def stats(array: np.ndarray) -> dict[str, torch.Tensor]:
             return {
