@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# @File:   modeling_fastvlm.py
-# @Author: Haozhe Xie
-# @Date:   2025-09-10 20:19:11
-# @Last Modified by: Haozhe Xie
-# @Last Modified at: 2026-02-26 10:12:16
-# @Email:  root@haozhexie.com
 
 import functools
 import logging

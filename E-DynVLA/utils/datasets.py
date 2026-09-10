@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# @File:   datasets.py
-# @Author: Haozhe Xie
-# @Date:   2025-06-17 16:10:33
-# @Last Modified by: Haozhe Xie
-# @Last Modified at: 2025-10-21 15:06:36
-# @Email:  root@haozhexie.com
 
 import logging
 import os

@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-#
-# @File:   configuration_dynamicvla.py
-# @Author: Haozhe Xie
-# @Date:   2025-08-21 15:22:31
-# @Last Modified by: Haozhe Xie
-# @Last Modified at: 2026-02-26 10:04:17
-# @Email:  root@haozhexie.com
+
 
 from dataclasses import dataclass, field
 

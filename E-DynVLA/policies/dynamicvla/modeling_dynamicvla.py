@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# @File:   modeling_dynamicvla.py
-# @Author: Haozhe Xie
-# @Date:   2025-08-21 15:23:45
-# @Last Modified by: Haozhe Xie
-# @Last Modified at: 2026-02-26 10:10:57
-# @Email:  root@haozhexie.com
 
 import logging
 import math

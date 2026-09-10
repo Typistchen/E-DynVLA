@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-#
-# @File:   modeling_vlm_with_expert.py
-# @Author: Haozhe Xie
-# @Date:   2025-09-16 11:23:15
-# @Last Modified by: Haozhe Xie
-# @Last Modified at: 2026-02-26 11:29:07
-# @Email:  root@haozhexie.com
+
 
 import collections
 import copy

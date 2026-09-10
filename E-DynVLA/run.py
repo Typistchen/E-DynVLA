@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-#
-# @File:   run.py
-# @Author: Haozhe Xie
-# @Date:   2025-03-14 15:09:46
-# @Last Modified by: Haozhe Xie
-# @Last Modified at: 2025-06-19 15:35:20
-# @Email:  root@haozhexie.com
+
 
 import argparse
 import datetime

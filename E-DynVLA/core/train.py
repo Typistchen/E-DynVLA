@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# @File:   train.py
-# @Author: Haozhe Xie
-# @Date:   2025-05-15 20:06:33
-# @Last Modified by: Haozhe Xie
-# @Last Modified at: 2025-10-06 16:58:01
-# @Email:  root@haozhexie.com
 
 import json
 import logging
