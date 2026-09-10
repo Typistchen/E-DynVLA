@@ -20,6 +20,7 @@ import torchvision.transforms.v2.functional as F
 import utils.memcached
 from utils.instruction_generator import InstructionGenerator
 from policies.edynvla.data import DOMEventDataset, EventWindowConfig
+from policies.edynvla.edv_support import EDVSupportDataset
 
 
 def get_dataset(
@@ -37,9 +38,50 @@ def get_dataset(
     event_output_size: tuple[int, int] = (96, 128),
     event_future_steps: int = 10,
     event_future_grid_size: tuple[int, int] = (12, 16),
+    event_code_root: str | pathlib.Path | None = None,
     action_horizon: int = 20,
     rotation_format: str = "euler",
+    edv_support_root: str | pathlib.Path | None = None,
+    edv_cache_root: str | pathlib.Path | None = None,
+    event_sensor: str = "wrist_cam",
+    edv_test_every: int = 10,
+    edv_exclude_failures: bool = True,
 ) -> torch.utils.data.Dataset:
+    if edv_support_root is not None:
+        edv_support_root = edv_support_root or os.getenv("EDV_SUPPORT_ROOT")
+        if not edv_support_root:
+            raise ValueError(
+                "E-DynVLA EDV-Support mode requires DATASET.EDV_SUPPORT_ROOT or "
+                "EDV_SUPPORT_ROOT"
+            )
+        edv_support_root = os.path.expandvars(str(edv_support_root))
+        cameras = tuple(
+            key.split(".")[-1]
+            for key in (required_features or [])
+            if key.startswith("observation.images.")
+        ) or ("opst_cam", "wrist_cam")
+        return EDVSupportDataset(
+            edv_support_root,
+            split=split,
+            event_config=EventWindowConfig(
+                sensor=event_sensor,
+                history_bins=event_history_bins,
+                bin_ms=event_bin_ms,
+                output_size=tuple(event_output_size),
+                future_steps=event_future_steps,
+                future_grid_size=tuple(event_future_grid_size),
+                event_code_root=event_code_root,
+            ),
+            cameras=cameras,
+            event_sensor=event_sensor,
+            delta_action=delta_action,
+            image_transforms=image_transforms,
+            test_every=edv_test_every,
+            exclude_failures=edv_exclude_failures,
+            event_cache_root=edv_cache_root,
+            event_code_root=event_code_root,
+            action_horizon=action_horizon,
+        )
     if event_manifest is not None:
         root = event_root or os.getenv("EDYNVLA_DATA_ROOT")
         if not root:
@@ -56,6 +98,7 @@ def get_dataset(
                 output_size=tuple(event_output_size),
                 future_steps=event_future_steps,
                 future_grid_size=tuple(event_future_grid_size),
+                event_code_root=event_code_root,
             ),
             split=split,
             delta_action=delta_action,
@@ -72,6 +115,24 @@ def get_dataset(
         image_transforms=image_transforms,
         delta_timestamps=delta_timestamps,
     )
+
+
+def get_edv_dataset_kwargs(cfg) -> dict:
+    """Resolve the EDV-Support dataset kwargs from cfg / env / defaults."""
+    event_code_root = cfg.DATASET.get("V2E_VLA_ROOT") or os.getenv("V2E_VLA_ROOT")
+    if event_code_root is None:
+        default_root = pathlib.Path(__file__).resolve().parents[1] / "V2E-VLA"
+        if (default_root / "scripts" / "separate_dynamic_static_events.py").is_file():
+            event_code_root = str(default_root)
+    return {
+        "edv_support_root": cfg.DATASET.get("EDV_SUPPORT_ROOT")
+        or os.getenv("EDV_SUPPORT_ROOT"),
+        "edv_cache_root": cfg.DATASET.get("EDV_CACHE_ROOT"),
+        "event_sensor": cfg.DATASET.get("EVENT_SENSOR", "wrist_cam"),
+        "edv_test_every": cfg.DATASET.get("EDV_TEST_EVERY", 10),
+        "edv_exclude_failures": cfg.DATASET.get("EDV_EXCLUDE_FAILURES", True),
+        "event_code_root": event_code_root,
+    }
 
 
 class ImageTransforms:

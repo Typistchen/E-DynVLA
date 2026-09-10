@@ -5,6 +5,21 @@ CONST:
 
 DATASET:
   NAME: hzxie/dynamic-objects
+  # EDV-Support (edv-4.0) mode: point this at the dataset root (or export
+  # EDV_SUPPORT_ROOT) and the raw AEDAT4 events are separated at read time.
+  # When set, it takes precedence over EVENT_MANIFEST below.
+  EDV_SUPPORT_ROOT:
+  # Derived per-sample event-H5 cache for the AEDAT4 -> HDF5 conversion.
+  # Defaults to <EDV_SUPPORT_ROOT>/derived_cache/events when empty.
+  EDV_CACHE_ROOT:
+  # Camera whose events and WAM future-RGB targets are used.
+  EVENT_SENSOR: wrist_cam
+  EDV_TEST_EVERY: 10
+  EDV_EXCLUDE_FAILURES: true
+  # V2E-VLA checkout providing the reference motion separator
+  # (scripts/separate_dynamic_static_events.py). Defaults to ../V2E-VLA.
+  V2E_VLA_ROOT:
+  # Legacy DOM + separated-event HDF5 mode (superseded by EDV_SUPPORT_ROOT).
   # Raw DOM and eventized DOM files are aligned through the manifest generated
   # by scripts/build_edynvla_manifest.py. Segmentation/object_vel are metrics
   # only and are never listed as model features.

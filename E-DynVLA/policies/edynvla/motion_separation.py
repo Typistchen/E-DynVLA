@@ -63,10 +63,12 @@ class RawEventMotionSeparator:
         event_code_root: str | Path | None,
         source_size=(360, 480),
         output_size=(96, 128),
+        future_output_size: tuple[int, int] | None = None,
         calibration: dict | None = None,
         thresholds: dict | None = None,
     ) -> None:
         module = _load_reference_module(event_code_root)
+        self._module = module
         self.separator = module.StreamingMotionSeparator(
             calibration or DEFAULT_CALIBRATION,
             thresholds=thresholds,
@@ -75,6 +77,14 @@ class RawEventMotionSeparator:
             source_size=source_size,
             output_size=output_size,
         )
+        self._aux_voxelizers: dict[tuple[int, int], object] = {}
+        if future_output_size is not None:
+            self._aux_voxelizers[tuple(future_output_size)] = (
+                module.ReusableSeparatedEventVoxelizer(
+                    source_size=source_size,
+                    output_size=tuple(future_output_size),
+                )
+            )
         self.support_h5 = support_h5
         self._maps_cache: dict[int, dict[str, np.ndarray]] = {}
 
@@ -114,9 +124,19 @@ class RawEventMotionSeparator:
         num_bins: int,
         bin_seconds: float,
         clip_count: float,
+        output_size: tuple[int, int] | None = None,
     ):
         maps = self.confidence_maps(frame_index, rgb_frames)
-        return self.voxelizer.voxelize(
+        voxelizer = self.voxelizer
+        if output_size is not None and tuple(output_size) != voxelizer.output_size:
+            voxelizer = self._aux_voxelizers.get(tuple(output_size))
+            if voxelizer is None:
+                voxelizer = self._module.ReusableSeparatedEventVoxelizer(
+                    source_size=self.voxelizer.source_size,
+                    output_size=tuple(output_size),
+                )
+                self._aux_voxelizers[tuple(output_size)] = voxelizer
+        return voxelizer.voxelize(
             x,
             y,
             t,

@@ -118,8 +118,10 @@ class SeparatedEventWindowReader:
         )
         self._rgb_frames = rgb_frames
         # One timestamp array per open episode keeps repeated searchsorted calls
-        # fast. Dataset workers should each construct their own reader.
-        self._timestamps = np.asarray(self._group["t"], dtype=np.float64)
+        # fast. Dataset workers should each construct their own reader. The
+        # on-disk dtype is preserved (float64 for stored DOM H5s, float32 for
+        # converted AEDAT4 caches) to halve memory for large event counts.
+        self._timestamps = np.asarray(self._group["t"])
         self.time_origin = float(
             self._file.attrs.get(
                 "event_time_origin_s",
@@ -141,6 +143,7 @@ class SeparatedEventWindowReader:
                 event_code_root=config.event_code_root,
                 source_size=config.source_size,
                 output_size=config.output_size,
+                future_output_size=config.future_grid_size,
             )
 
     def close(self) -> None:
@@ -227,6 +230,7 @@ class SeparatedEventWindowReader:
                 num_bins=self.config.future_steps,
                 bin_seconds=self.config.bin_seconds,
                 clip_count=1.0,
+                output_size=self.config.future_grid_size,
             )
             return torch.from_numpy(
                 np.concatenate([static, dynamic], axis=1)

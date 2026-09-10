@@ -39,6 +39,7 @@ def test(cfg, test_data_loader=None, policy=None):
             event_future_grid_size=cfg.POLICY.get("WAM_GRID_SIZE", (12, 16)),
             action_horizon=cfg.POLICY.get("CHUNK_SIZE", 20),
             rotation_format=cfg.DATASET.get("ROTATION_FORMAT", "euler"),
+            **utils.datasets.get_edv_dataset_kwargs(cfg),
         )
         test_data_loader = torch.utils.data.DataLoader(
             dataset=test_dataset,

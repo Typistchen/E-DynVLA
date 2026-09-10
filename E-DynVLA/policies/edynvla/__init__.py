@@ -5,6 +5,7 @@ from policies.edynvla.event_tokenizer import (
     SparseEventTokenizer,
 )
 from policies.edynvla.data import DOMEventDataset, EventWindowConfig
+from policies.edynvla.edv_support import EDVSupportDataset
 from policies.edynvla.event_wam import (
     EventWAMHead,
     WAMOutput,
@@ -18,6 +19,7 @@ from policies.edynvla.event_wam import (
 __all__ = [
     "EventTokenBatch",
     "DOMEventDataset",
+    "EDVSupportDataset",
     "EventWindowConfig",
     "EventWAMHead",
     "WAMOutput",
