@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 
 
 CAMERAS = ("wrist_cam", "opst_cam", "side_cam")
+MOTION_SUPPORT_CAMERA = "wrist_cam"
 EXPECTED_SCHEMA = pa.schema(
     [
         ("action", pa.list_(pa.float32())),
@@ -72,6 +73,31 @@ def validate_aedat(path: Path, expected_count: int) -> dict:
         "monotonic": monotonic,
         "size_bytes": path.stat().st_size,
     }
+
+
+def validate_motion_support(path: Path, frame_count: int) -> dict:
+    import h5py
+
+    expected = {
+        "depth_metric": (frame_count, 360, 480),
+        "motion_vectors": (frame_count, 360, 480, 2),
+        "pose_w_ros": (frame_count, 7),
+        "intrinsics": (frame_count, 3, 3),
+        "timestamp": (frame_count,),
+    }
+    with h5py.File(path, "r", libver="latest") as handle:
+        found = {}
+        for key, shape in expected.items():
+            if key not in handle or tuple(handle[key].shape) != shape:
+                actual = None if key not in handle else tuple(handle[key].shape)
+                raise RuntimeError(
+                    f"Bad support field {key} in {path}: {actual}, expected {shape}"
+                )
+            found[key] = {
+                "shape": list(handle[key].shape),
+                "dtype": str(handle[key].dtype),
+            }
+    return {"fields": found, "size_bytes": path.stat().st_size}
 
 
 def main() -> None:
@@ -139,6 +165,14 @@ def main() -> None:
                 sample / "events" / f"{camera}.aedat4",
                 int(reproduction["events"][camera]["event_count"]),
             )
+        support_info = reproduction.get("motion_separation_support")
+        if support_info is not None:
+            support = validate_motion_support(
+                sample / support_info["path"],
+                frame_count,
+            )
+        else:
+            support = None
 
         for relative, expected_hash in reproduction["file_sha256"].items():
             actual_hash = sha256_file(sample / relative)
@@ -159,6 +193,7 @@ def main() -> None:
                 "outcome": reproduction.get("outcome"),
                 "videos": videos,
                 "events": events,
+                "motion_separation_support": support,
                 "size_bytes": size_bytes,
                 "sha256_valid": True,
             }

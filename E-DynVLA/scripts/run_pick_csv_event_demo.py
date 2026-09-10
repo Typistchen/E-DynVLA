@@ -345,7 +345,7 @@ def main() -> None:
             event_hybrid=True,
             event_hybrid_gate_gain=0.25,
             event_hybrid_support_radius=2,
-            event_dynamic_gt=False,
+            event_dynamic_gt=True,
             num_envs=1,
             path_tracing=False,
             robot="franka",
