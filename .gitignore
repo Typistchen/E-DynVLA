@@ -1,2 +1,5 @@
 # Local EDV sample data (raw simulation dumps, never commit)
 dataset/
+
+# Downloaded model checkpoints (e.g. hzxie/dynamic-vla-DOM)
+checkpoints/

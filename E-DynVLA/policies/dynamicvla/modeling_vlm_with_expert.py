@@ -22,6 +22,9 @@ class VLMWithExpertModel(torch.nn.Module):
         num_vlm_layers: int = -1,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
+        mot_linear_bridge: bool = False,
+        mot_bridge_gate_init: float = 0.0,
+        mot_bridge_num_heads: int = 8,
     ) -> None:
         super().__init__()
         # Tokenizer
@@ -64,6 +67,53 @@ class VLMWithExpertModel(torch.nn.Module):
         self.num_expert_layers = len(self.lm_expert.layers) - num_expert_skip_layers
         self.num_expert_skip_layers = num_expert_skip_layers
         self.self_attn_every_n_layers = self_attn_every_n_layers
+
+        # Additive multi-layer MoT bridges. On cross-attention layers the
+        # expert additionally reads a gated projection of the VLM hidden
+        # states entering the same layer. Zero-initialized gates keep the
+        # pretrained behaviour exactly intact when loading a checkpoint.
+        self.mot_bridges = None
+        self.mot_bridge_gates = None
+        self._bridge_index_map: dict[int, int] = {}
+        if mot_linear_bridge and "cross" in attention_mode:
+            vlm_hidden_size = self.vlm_config.text_config.hidden_size
+            expert_hidden_size = lm_expert_config.hidden_size
+            bridge_layers = [
+                layer_idx
+                for layer_idx in range(self.num_vlm_layers)
+                if not (
+                    layer_idx < num_expert_skip_layers
+                    or (
+                        self_attn_every_n_layers > 0
+                        and layer_idx % self_attn_every_n_layers == 0
+                    )
+                )
+            ]
+            self._bridge_index_map = {
+                layer_idx: position
+                for position, layer_idx in enumerate(bridge_layers)
+            }
+            self.mot_bridges = torch.nn.ModuleList(
+                torch.nn.ModuleDict(
+                    {
+                        "norm": torch.nn.LayerNorm(vlm_hidden_size),
+                        "proj": torch.nn.Sequential(
+                            torch.nn.Linear(vlm_hidden_size, expert_hidden_size),
+                            torch.nn.GELU(),
+                            torch.nn.Linear(expert_hidden_size, expert_hidden_size),
+                        ),
+                        "attn": torch.nn.MultiheadAttention(
+                            expert_hidden_size,
+                            num_heads=mot_bridge_num_heads,
+                            batch_first=True,
+                        ),
+                    }
+                )
+                for _ in bridge_layers
+            )
+            self.mot_bridge_gates = torch.nn.Parameter(
+                torch.full((len(bridge_layers),), float(mot_bridge_gate_init))
+            )
 
         self.freeze_vision_model = freeze_vision_model
         self.freeze_connector = freeze_connector
@@ -513,6 +563,7 @@ class VLMWithExpertModel(torch.nn.Module):
         inputs_embeds: list[torch.FloatTensor] = None,
         use_cache: bool | None = None,
         fill_kv_cache: bool | None = None,
+        pad_masks: torch.Tensor | None = None,
     ) -> tuple[list[torch.FloatTensor], list[torch.FloatTensor] | None]:
         models = [self._get_text_model(self.get_vlm_model()), self.lm_expert]
         model_layers = self._get_model_layers(models)
@@ -555,6 +606,30 @@ class VLMWithExpertModel(torch.nn.Module):
             if past_key_values is not None:
                 past_key_values[layer_idx] = _past_key_values
 
+            # MoT bridge memory: project the VLM hidden states entering this
+            # layer into the expert space. Computed whenever the VLM stream
+            # is present; persisted into the KV cache at prefill so the
+            # denoise steps can reuse it without re-running the VLM.
+            bridge_idx = (
+                self._bridge_index_map.get(layer_idx)
+                if self.mot_bridges is not None
+                else None
+            )
+            bridge_memory = None
+            if bridge_idx is not None:
+                if inputs_embeds[0] is not None:
+                    bridge = self.mot_bridges[bridge_idx]
+                    bridge_dtype = next(bridge.parameters()).dtype
+                    bridge_memory = bridge["proj"](
+                        bridge["norm"](inputs_embeds[0].to(bridge_dtype))
+                    )
+                    if past_key_values is not None and fill_kv_cache:
+                        past_key_values[layer_idx]["bridge_memory"] = bridge_memory
+                elif past_key_values is not None:
+                    bridge_memory = past_key_values[layer_idx].get(
+                        "bridge_memory"
+                    )
+
             for i, hidden_states in enumerate(inputs_embeds):
                 layer = model_layers[layer_idx][i]
                 att_output = (
@@ -579,6 +654,28 @@ class VLMWithExpertModel(torch.nn.Module):
                     out_emb = layer.post_attention_layernorm(out_emb)
                     out_emb = layer.mlp(out_emb)
                     out_emb += after_first_residual
+
+                    # Additive MoT bridge: the expert stream reads a gated
+                    # projection of the VLM hidden states. With zero gates
+                    # this is an exact no-op, preserving the pretrained
+                    # checkpoint behaviour at the start of finetuning.
+                    if i == 1 and bridge_idx is not None and bridge_memory is not None:
+                        prefix_pad = (
+                            pad_masks[:, : bridge_memory.shape[1]]
+                            if pad_masks is not None
+                            else None
+                        )
+                        bridge_attn, _ = self.mot_bridges[bridge_idx]["attn"](
+                            query=hidden_states.to(bridge_memory.dtype),
+                            key=bridge_memory,
+                            value=bridge_memory,
+                            key_padding_mask=(
+                                ~prefix_pad if prefix_pad is not None else None
+                            ),
+                            need_weights=False,
+                        )
+                        gate = self.mot_bridge_gates[bridge_idx].to(out_emb.dtype)
+                        out_emb = out_emb + gate * bridge_attn.to(out_emb.dtype)
 
                     outputs_embeds.append(out_emb)
                     start = end if len(att_outputs) == 1 else 0

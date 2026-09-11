@@ -41,6 +41,9 @@ class EventWindowConfig:
     future_steps: int = 10
     future_grid_size: tuple[int, int] = (12, 16)
     event_code_root: str | None = None
+    # Dynamic-only training: skip the static stream and all future-activity
+    # computation at read time.
+    dynamic_only: bool = False
 
     @property
     def bin_seconds(self) -> float:
@@ -319,6 +322,36 @@ class SeparatedEventWindowReader:
         start_time = end_time - self.config.history_bins * self.config.bin_seconds
         lo, hi = self._window_bounds(start_time, end_time)
         arrays = self._read_slice(int(lo), int(hi))
+        if self.config.dynamic_only:
+            if not self._has_stored_confidence:
+                _, dynamic = self._motion_separator.voxelize(
+                    x=arrays["x"],
+                    y=arrays["y"],
+                    t=arrays["t"],
+                    p=arrays["p"],
+                    frame_index=frame_index,
+                    rgb_frames=self._rgb_frames,
+                    start_time=start_time,
+                    num_bins=self.config.history_bins,
+                    bin_seconds=self.config.bin_seconds,
+                    clip_count=self.config.clip_count,
+                )
+                return {DYNAMIC_EVENT_KEY: torch.from_numpy(dynamic)}
+            illumination_keep = np.clip(1.0 - arrays["q_illumination"], 0.0, 1.0)
+            dynamic = voxelize_weighted_events(
+                x=arrays["x"],
+                y=arrays["y"],
+                t=arrays["t"],
+                polarity=arrays["p"],
+                weight=arrays["q_dynamic"] * illumination_keep,
+                start_time=start_time,
+                num_bins=self.config.history_bins,
+                bin_seconds=self.config.bin_seconds,
+                source_size=self.config.source_size,
+                output_size=self.config.output_size,
+                clip_count=self.config.clip_count,
+            )
+            return {DYNAMIC_EVENT_KEY: dynamic}
         if not self._has_stored_confidence:
             static, dynamic = self._motion_separator.voxelize(
                 x=arrays["x"],

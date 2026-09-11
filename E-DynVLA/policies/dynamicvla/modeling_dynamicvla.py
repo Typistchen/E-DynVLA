@@ -25,11 +25,6 @@ from policies.dynamicvla.modeling_fastvlm import (
 )
 from policies.dynamicvla.modeling_vlm_with_expert import VLMWithExpertModel
 from policies.edynvla.event_tokenizer import EventTokenBatch, SparseEventTokenizer
-from policies.edynvla.event_wam import (
-    WorldActionModelHead,
-    multimodal_wam_loss,
-    multimodal_wam_metrics,
-)
 
 # Matches ".soNNN", optionally followed by "-something", up to the "_buffer_" marker
 _VARIANT_RE = re.compile(r"\.so\d+(?:-[\w]+)?_buffer_")
@@ -118,8 +113,22 @@ def load_dynamicvla(
     norm_keys = ("normalize_inputs", "normalize_targets", "unnormalize_outputs")
     state_dict = {k: v for k, v in state_dict.items() if not k.startswith(norm_keys)}
 
+    # The state moved from the VLM prefix (state_proj) to the expert suffix
+    # (state_encoder). Pretrained DynamicVLA checkpoints still carry the old
+    # projection; drop it instead of failing on unexpected keys.
+    legacy_keys = ("model.state_proj.",)
+    dropped = [k for k in state_dict if k.startswith(legacy_keys)]
+    if dropped:
+        logging.info("Dropping legacy checkpoint keys: %s", dropped)
+        state_dict = {k: v for k, v in state_dict.items() if not k.startswith(legacy_keys)}
+
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    optional_new_keys = ("model.event_tokenizer.", "model.wam_head.")
+    optional_new_keys = (
+        "model.event_tokenizer.",
+        "model.state_encoder.",
+        "model.vlm_with_expert.mot_bridges.",
+        "model.vlm_with_expert.mot_bridge_gates",
+    )
     if not all(key.startswith(norm_keys + optional_new_keys) for key in missing) or unexpected:
         raise RuntimeError(
             "DynamicVLA %d missing / %d unexpected keys"
@@ -384,16 +393,15 @@ class DynamicVLAPolicy(PreTrainedPolicy):
         }
         if vla_cfg.use_event_tokens:
             event_h, event_w = vla_cfg.event_input_size
-            for key in (vla_cfg.static_event_key, vla_cfg.dynamic_event_key):
-                dummy_batch[key] = torch.zeros(
-                    1,
-                    vla_cfg.event_history_bins,
-                    2,
-                    event_h,
-                    event_w,
-                    dtype=torch.float32,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                )
+            dummy_batch[vla_cfg.dynamic_event_key] = torch.zeros(
+                1,
+                vla_cfg.event_history_bins,
+                2,
+                event_h,
+                event_w,
+                dtype=torch.float32,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+            )
         dummy_batch["task"] = ["dummy text input"]
         vla_model._get_action_chunk(dummy_batch)
         q_out.put({"initialized": True})
@@ -504,13 +512,7 @@ class DynamicVLAPolicy(PreTrainedPolicy):
 
         event_values = {
             key: batch[key]
-            for key in (
-                self.config.static_event_key,
-                self.config.dynamic_event_key,
-                self.config.future_event_key,
-                self.config.future_rgb_key,
-                self.config.future_rgb_valid_key,
-            )
+            for key in (self.config.dynamic_event_key,)
             if key in batch
         }
         batch = self.normalize_inputs(batch)
@@ -527,54 +529,6 @@ class DynamicVLAPolicy(PreTrainedPolicy):
 
         actions = self._get_action_chunk(batch, noise)
         return actions
-
-    @torch.no_grad()
-    def predict_action_chunk_with_world(
-        self, batch: dict[str, torch.Tensor], noise: torch.Tensor | None = None
-    ) -> dict[str, torch.Tensor]:
-        """Predict an action chunk and its action-conditioned future world.
-
-        RGB has shape ``[B,3,grid_h,grid_w]``. Event probabilities have shape
-        ``[B,future_steps,4,grid_h,grid_w]`` with channels ordered as static-OFF,
-        static-ON, dynamic-OFF, and dynamic-ON.
-        """
-        if not self.config.wam_enabled:
-            raise RuntimeError("WAM is disabled in the policy config")
-
-        self.eval()
-        batch = self._prepare_batch(batch)
-        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
-        for key in batch:
-            if key in self._queues and key != ACTION:
-                batch[key] = torch.stack(list(self._queues[key]), dim=1)
-        images, img_masks = self.prepare_images(batch)
-        state = self.prepare_state(batch)
-        lang_tokens, lang_masks = self.prepare_language(batch)
-        event_batch = self.model.encode_events(self.prepare_events(batch))
-        model_actions, world_context = self.model.sample_actions(
-            images,
-            img_masks,
-            lang_tokens,
-            lang_masks,
-            state,
-            noise=noise,
-            event_batch=event_batch,
-            return_world_context=True,
-        )
-        future_world = self.model.predict_future_world(
-            *world_context, action_context=model_actions
-        )
-
-        actions = model_actions[:, :, : self.config.action_feature.shape[0]]
-        actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
-        if self.config.adapt_to_pi_aloha:
-            actions = self._pi_aloha_encode_actions(actions)
-        return {
-            ACTION: actions,
-            "future_rgb": future_world.rgb,
-            "future_event_logits": future_world.event_logits,
-            "future_event_probability": future_world.event_logits.sigmoid(),
-        }
 
     @torch.no_grad()
     def select_action(
@@ -680,13 +634,7 @@ class DynamicVLAPolicy(PreTrainedPolicy):
 
         event_values = {
             key: batch[key]
-            for key in (
-                self.config.static_event_key,
-                self.config.dynamic_event_key,
-                self.config.future_event_key,
-                self.config.future_rgb_key,
-                self.config.future_rgb_valid_key,
-            )
+            for key in (self.config.dynamic_event_key,)
             if key in batch
         }
         batch = self.normalize_inputs(batch)
@@ -700,7 +648,7 @@ class DynamicVLAPolicy(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
         loss_dict = {}
-        model_output = self.model.forward(
+        losses = self.model.forward(
             images,
             img_masks,
             lang_tokens,
@@ -710,61 +658,22 @@ class DynamicVLAPolicy(PreTrainedPolicy):
             noise,
             time,
             event_batch=event_batch,
-            return_world_context=self.config.wam_enabled,
         )
-        if self.config.wam_enabled:
-            losses, world_context = model_output
-        else:
-            losses = model_output
-            world_context = None
         loss_dict["losses_after_forward"] = losses.clone()
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
             losses = losses * in_episode_bound.unsqueeze(-1)
             loss_dict["losses_after_in_ep_bound"] = losses.clone()
 
-        # Remove padding
-        losses = losses[:, :, : self.config.max_action_dim]
+        # Only supervise the real action dimensions; the padded dimensions
+        # of max_action_dim are not part of the target.
+        action_dim = self.config.action_feature.shape[0]
+        losses = losses[:, :, :action_dim]
         loss_dict["losses_after_rm_padding"] = losses.clone()
 
         # For backward pass
         loss = losses.mean()
         loss_dict["action_loss"] = loss.detach().item()
-        if self.config.wam_enabled:
-            missing_targets = [
-                key
-                for key in (self.config.future_event_key, self.config.future_rgb_key)
-                if key not in batch
-            ]
-            if missing_targets:
-                raise KeyError(
-                    f"missing WAM targets: {missing_targets}"
-                )
-            future_world = self.model.predict_future_world(
-                *world_context,
-                action_context=actions.detach(),
-                action_mask=None if actions_is_pad is None else ~actions_is_pad,
-            )
-            wam_loss, wam_parts = multimodal_wam_loss(
-                future_world,
-                batch[self.config.future_rgb_key],
-                batch[self.config.future_event_key],
-                rgb_weight=self.config.wam_rgb_loss_weight,
-                event_weight=self.config.wam_event_loss_weight,
-                positive_weight=self.config.wam_positive_weight,
-                rgb_valid_mask=batch.get(self.config.future_rgb_valid_key),
-            )
-            loss = loss + self.config.wam_loss_weight * wam_loss
-            loss_dict["wam_loss"] = wam_loss.item()
-            loss_dict["wam_rgb_loss"] = wam_parts["rgb_loss"].item()
-            loss_dict["wam_event_loss"] = wam_parts["event_loss"].item()
-            for name, value in multimodal_wam_metrics(
-                future_world,
-                batch[self.config.future_rgb_key],
-                batch[self.config.future_event_key],
-                rgb_valid_mask=batch.get(self.config.future_rgb_valid_key),
-            ).items():
-                loss_dict[f"wam_{name}"] = value.item()
         # For backward pass
         loss_dict["loss"] = loss.item()
         return loss, loss_dict
@@ -891,29 +800,24 @@ class DynamicVLAPolicy(PreTrainedPolicy):
 
     def prepare_events(
         self, batch: dict[str, torch.Tensor]
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Return confidence-weighted static/dynamic event voxel histories."""
+    ) -> torch.Tensor | None:
+        """Return the confidence-weighted dynamic event voxel history."""
         if not self.config.use_event_tokens:
             return None
-        missing = [
-            key
-            for key in (self.config.static_event_key, self.config.dynamic_event_key)
-            if key not in batch
-        ]
-        if missing:
-            raise KeyError(f"missing E-DynVLA event inputs: {missing}")
-        static = batch[self.config.static_event_key].float()
-        dynamic = batch[self.config.dynamic_event_key].float()
-        if static.ndim == 5:
-            return static, dynamic
-        if static.ndim == 6:
+        key = self.config.dynamic_event_key
+        if key not in batch:
+            raise KeyError(f"missing E-DynVLA event input: {key}")
+        dynamic = batch[key].float()
+        if dynamic.ndim == 5:
+            return dynamic
+        if dynamic.ndim == 6:
             # Inference queues may retain multiple observation-time event
             # windows. Each window already contains its own temporal bins, so
             # only the newest observation window belongs in the tokenizer.
-            return static[:, -1], dynamic[:, -1]
+            return dynamic[:, -1]
         raise ValueError(
             "event inputs must have shape [B,T,2,H,W] "
-            f"(received {tuple(static.shape)})"
+            f"(received {tuple(dynamic.shape)})"
         )
 
 
@@ -984,9 +888,18 @@ class VLAFlowMatching(torch.nn.Module):
         self.vlm_with_expert: VLMWithExpertModel = self._get_vlm_with_expert(
             config, config.vlm_model_name, vlm_input_channels
         )
-        self.state_proj = torch.nn.Linear(
-            config.max_state_dim,
-            self.vlm_with_expert.vlm_config.text_config.hidden_size,
+        # The state is an expert-side condition: normalize + pad + encode it
+        # straight into the expert hidden size. It never enters the VLM.
+        self.state_encoder = torch.nn.Sequential(
+            torch.nn.Linear(
+                config.max_state_dim, self.vlm_with_expert.expert_hidden_size
+            ),
+            torch.nn.SiLU(),
+            torch.nn.Linear(
+                self.vlm_with_expert.expert_hidden_size,
+                self.vlm_with_expert.expert_hidden_size,
+            ),
+            torch.nn.LayerNorm(self.vlm_with_expert.expert_hidden_size),
         )
         self.action_in_proj = torch.nn.Linear(
             config.max_action_dim, self.vlm_with_expert.expert_hidden_size
@@ -1004,7 +917,6 @@ class VLAFlowMatching(torch.nn.Module):
         )
         vlm_hidden_size = self.vlm_with_expert.vlm_config.text_config.hidden_size
         self.event_tokenizer = None
-        self.wam_head = None
         if config.use_event_tokens:
             self.event_tokenizer = SparseEventTokenizer(
                 hidden_dim=config.event_hidden_size,
@@ -1016,44 +928,16 @@ class VLAFlowMatching(torch.nn.Module):
                 num_heads=config.event_num_heads,
                 min_patch_density=config.event_min_patch_density,
             )
-        if config.wam_enabled:
-            self.wam_head = WorldActionModelHead(
-                context_dim=vlm_hidden_size,
-                hidden_dim=config.wam_hidden_size,
-                action_dim=config.max_action_dim,
-                future_steps=config.wam_future_steps,
-                grid_size=config.wam_grid_size,
-                num_layers=config.wam_num_layers,
-                num_heads=config.wam_num_heads,
-            )
         self._set_requires_grad()
 
     def encode_events(
-        self, events: tuple[torch.Tensor, torch.Tensor] | None
+        self, events: torch.Tensor | None
     ) -> EventTokenBatch | None:
         if events is None:
             return None
         if self.event_tokenizer is None:
             raise RuntimeError("received event inputs while event tokenization is disabled")
-        return self.event_tokenizer(*events)
-
-    def predict_future_world(
-        self,
-        context_tokens: torch.Tensor,
-        context_mask: torch.Tensor,
-        action_context: torch.Tensor | None = None,
-        action_mask: torch.Tensor | None = None,
-    ):
-        if self.wam_head is None:
-            raise RuntimeError("WAM is disabled")
-        if action_context is None:
-            raise ValueError("WAM requires an action context")
-        return self.wam_head(
-            context_tokens,
-            context_mask,
-            action_history=action_context,
-            action_mask=action_mask,
-        )
+        return self.event_tokenizer(events)
 
     def _get_vlm_with_expert(
         self,
@@ -1126,10 +1010,13 @@ class VLAFlowMatching(torch.nn.Module):
             attention_mode=config.attention_mode,
             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
             expert_width_multiplier=self.config.expert_width_multiplier,
+            mot_linear_bridge=config.mot_linear_bridge,
+            mot_bridge_gate_init=config.mot_bridge_gate_init,
+            mot_bridge_num_heads=config.mot_bridge_num_heads,
         )
 
     def _set_requires_grad(self):
-        for params in self.state_proj.parameters():
+        for params in self.state_encoder.parameters():
             params.requires_grad = self.config.train_state_proj
 
     def _sample_noise(self, shape, device, dtype=torch.float32):
@@ -1154,7 +1041,6 @@ class VLAFlowMatching(torch.nn.Module):
         img_masks,
         lang_tokens,
         lang_masks,
-        state: torch.Tensor = None,
         event_batch: EventTokenBatch | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         embs = []
@@ -1202,21 +1088,6 @@ class VLAFlowMatching(torch.nn.Module):
         num_lang_embs = lang_emb.shape[1]
         att_masks += [0] * num_lang_embs
 
-        if state is not None:
-            state_emb = self.state_proj(state)
-            state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb
-            embs.append(state_emb)
-            states_seq_len = state_emb.shape[1]
-            state_mask = torch.ones(
-                state_emb.shape[0],
-                states_seq_len,
-                dtype=torch.bool,
-                device=state_emb.device,
-            )
-            pad_masks.append(state_mask)
-            # Set attention masks so that image and language inputs do not attend to state or actions
-            att_masks += [1] * (states_seq_len)
-
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
@@ -1231,10 +1102,26 @@ class VLAFlowMatching(torch.nn.Module):
         att_masks = att_masks.expand(bsize, -1)
         return embs, pad_masks, att_masks
 
-    def _embed_suffix(self, noisy_actions, timestep):
+    def _embed_suffix(self, noisy_actions, timestep, state=None):
         embs = []
         pad_masks = []
         att_masks = []
+
+        # The state is an expert-side condition token prepended to the
+        # noisy action chunk. It never enters the VLM prefix.
+        if state is not None:
+            state_emb = self.state_encoder(state)
+            state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb
+            embs.append(state_emb)
+            state_mask = torch.ones(
+                state_emb.shape[0],
+                state_emb.shape[1],
+                dtype=torch.bool,
+                device=state_emb.device,
+            )
+            pad_masks.append(state_mask)
+            # A new attention block: prefix tokens never attend to it.
+            att_masks += [1] * state_emb.shape[1]
 
         # Fuse timestep + action information using an MLP
         action_emb = self.action_in_proj(noisy_actions)
@@ -1266,8 +1153,12 @@ class VLAFlowMatching(torch.nn.Module):
         )
         pad_masks.append(action_time_mask)
 
-        # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] * self.config.chunk_size
+        # The whole noisy action chunk is known at once (training reads it
+        # from the data, inference denoises it jointly), so the action
+        # tokens form one bidirectional block instead of a causal sequence:
+        # a new block starts at the first action token and the remaining
+        # tokens share its block.
+        att_masks += [1] + [0] * (self.config.chunk_size - 1)
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
@@ -1296,7 +1187,6 @@ class VLAFlowMatching(torch.nn.Module):
         noise=None,
         time=None,
         event_batch: EventTokenBatch | None = None,
-        return_world_context: bool = False,
     ):
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
@@ -1313,10 +1203,11 @@ class VLAFlowMatching(torch.nn.Module):
             img_masks,
             lang_tokens,
             lang_masks,
-            state=state,
             event_batch=event_batch,
         )
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self._embed_suffix(x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self._embed_suffix(
+            x_t, time, state=state
+        )
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
@@ -1330,14 +1221,13 @@ class VLAFlowMatching(torch.nn.Module):
             inputs_embeds=[prefix_embs, suffix_embs],
             use_cache=False,
             fill_kv_cache=False,
+            pad_masks=pad_masks,
         )
         suffix_out = suffix_out[:, -self.config.chunk_size :]
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
-        if return_world_context:
-            return losses, (prefix_embs, prefix_pad_masks)
         return losses
 
     def sample_vlm_embedding(
@@ -1346,7 +1236,6 @@ class VLAFlowMatching(torch.nn.Module):
         img_masks,
         lang_tokens,
         lang_masks,
-        state,
         event_batch: EventTokenBatch | None = None,
     ) -> torch.Tensor:
         """Do a half inference forward and compute the VLM embedding"""
@@ -1356,7 +1245,6 @@ class VLAFlowMatching(torch.nn.Module):
             img_masks,
             lang_tokens,
             lang_masks,
-            state,
             event_batch=event_batch,
         )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
@@ -1369,6 +1257,7 @@ class VLAFlowMatching(torch.nn.Module):
             inputs_embeds=[prefix_embs, None],
             use_cache=self.config.use_cache,
             fill_kv_cache=True,
+            pad_masks=prefix_pad_masks,
         )
         return prefix_pad_masks, past_key_values, prefix_embs
 
@@ -1381,7 +1270,6 @@ class VLAFlowMatching(torch.nn.Module):
         state,
         noise=None,
         event_batch: EventTokenBatch | None = None,
-        return_world_context: bool = False,
     ):
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = state.shape[0]
@@ -1395,7 +1283,6 @@ class VLAFlowMatching(torch.nn.Module):
             img_masks,
             lang_tokens,
             lang_masks,
-            state,
             event_batch=event_batch,
         )
         dt = -1.0 / self.config.num_steps
@@ -1410,13 +1297,12 @@ class VLAFlowMatching(torch.nn.Module):
                 past_key_values,
                 x_t,
                 expanded_time,
+                state=state,
             )
             # Euler step
             x_t += dt * v_t
             time += dt
 
-        if return_world_context:
-            return x_t, (prefix_embs, prefix_pad_masks)
         return x_t
 
     def denoise_step(
@@ -1425,10 +1311,11 @@ class VLAFlowMatching(torch.nn.Module):
         past_key_values,
         x_t,
         timestep,
+        state=None,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
         suffix_embs, suffix_pad_masks, suffix_att_masks = self._embed_suffix(
-            x_t, timestep
+            x_t, timestep, state=state
         )
 
         suffix_len = suffix_pad_masks.shape[1]
@@ -1442,6 +1329,7 @@ class VLAFlowMatching(torch.nn.Module):
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = self._get_position_ids(prefix_offsets, suffix_pad_masks)
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
 
         outputs_embeds, _ = self.vlm_with_expert.forward(
             attention_mask=full_att_2d_masks,
@@ -1450,6 +1338,7 @@ class VLAFlowMatching(torch.nn.Module):
             inputs_embeds=[None, suffix_embs],
             use_cache=self.config.use_cache,
             fill_kv_cache=False,
+            pad_masks=pad_masks,
         )
         suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.chunk_size :]

@@ -1,10 +1,10 @@
-"""Sparse static/dynamic event tokenization for E-DynVLA.
+"""Sparse dynamic event tokenization for E-DynVLA.
 
 This is deliberately not an object detector.  It converts a short history of
-static-world-consistent and independently-dynamic event voxels into a compact
-sequence of tokens.  The design follows the useful part of event-language
-models: sparse spatio-temporal selection, modality/type embeddings, temporal
-aggregation, and projection into the VLM token space.
+dynamic-object event voxels into a compact sequence of tokens.  The design
+follows the useful part of event-language models: sparse spatio-temporal
+selection, modality/type embeddings, temporal aggregation, and projection
+into the VLM token space.
 """
 
 from __future__ import annotations
@@ -27,14 +27,14 @@ class EventTokenBatch:
 
 
 class SparseEventTokenizer(nn.Module):
-    """Tokenize static and dynamic event voxel histories without detection.
+    """Tokenize dynamic event voxel histories without detection.
 
     Args:
         hidden_dim: Internal event-token width.
         output_dim: Width expected by the downstream VLM.
         patch_size: Non-overlapping spatial patch size.
-        max_patches_per_bin: Highest-density patches kept for each time bin and
-            event type.  Empty patches are masked after top-k selection.
+        max_patches_per_bin: Highest-density patches kept for each time bin.
+            Empty patches are masked after top-k selection.
         history_bins: Maximum supported temporal history.
         num_layers: Number of temporal Transformer encoder layers.
         num_heads: Attention heads in the temporal encoder.
@@ -42,15 +42,14 @@ class SparseEventTokenizer(nn.Module):
             sparse patch token.
     """
 
-    STATIC = 0
-    DYNAMIC = 1
-    SUMMARY = 2
+    DYNAMIC = 0
+    SUMMARY = 1
 
     def __init__(
         self,
         *,
         hidden_dim: int = 256,
-        output_dim: int = 768,
+        output_dim: int = 960,
         patch_size: int = 16,
         max_patches_per_bin: int = 8,
         history_bins: int = 8,
@@ -72,17 +71,15 @@ class SparseEventTokenizer(nn.Module):
         self.history_bins = history_bins
         self.min_patch_density = min_patch_density
 
-        # The static and dynamic streams share weights so that their tokens live
-        # in the same motion space; learned type embeddings keep them separable.
         self.patch_embed = nn.Conv2d(
             2, hidden_dim, kernel_size=patch_size, stride=patch_size, bias=True
         )
-        self.modality_embedding = nn.Embedding(3, hidden_dim)
+        self.modality_embedding = nn.Embedding(2, hidden_dim)
         self.time_embedding = nn.Embedding(history_bins, hidden_dim)
         self.coordinate_embedding = nn.Sequential(
             nn.Linear(2, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim)
         )
-        self.summary_tokens = nn.Parameter(torch.empty(2, hidden_dim))
+        self.summary_tokens = nn.Parameter(torch.empty(1, hidden_dim))
         nn.init.normal_(self.summary_tokens, std=0.02)
 
         layer = nn.TransformerEncoderLayer(
@@ -106,45 +103,43 @@ class SparseEventTokenizer(nn.Module):
 
     @property
     def max_tokens(self) -> int:
-        return 2 + 2 * self.history_bins * self.max_patches_per_bin
+        return 1 + self.history_bins * self.max_patches_per_bin
 
-    def forward(
-        self,
-        static_voxels: torch.Tensor,
-        dynamic_voxels: torch.Tensor,
-    ) -> EventTokenBatch:
-        """Create sparse tokens.
+    def forward(self, dynamic_voxels: torch.Tensor) -> EventTokenBatch:
+        """Create sparse dynamic-event tokens.
 
-        Both inputs must have shape ``[B, T, 2, H, W]``.  Channel 0/1 stores
-        OFF/ON event activity.  Values may be binary, counts, or confidence-
-        weighted log counts, but both streams must use the same scale.
+        The input must have shape ``[B, T, 2, H, W]``.  Channel 0/1 stores
+        OFF/ON event activity.  Values may be binary, counts, or
+        confidence-weighted log counts.
         """
-        self._validate_inputs(static_voxels, dynamic_voxels)
-        batch_size, time_bins = static_voxels.shape[:2]
+        self._validate_inputs(dynamic_voxels)
+        batch_size = dynamic_voxels.shape[0]
 
-        static = self._tokenize_stream(static_voxels, self.STATIC)
-        dynamic = self._tokenize_stream(dynamic_voxels, self.DYNAMIC)
+        dynamic = self._tokenize_stream(dynamic_voxels)
 
         summary = self.summary_tokens[None].expand(batch_size, -1, -1)
-        summary_modality = torch.tensor(
-            [self.STATIC, self.DYNAMIC], device=summary.device, dtype=torch.long
-        )[None].expand(batch_size, -1)
+        summary_modality = torch.full(
+            (batch_size, 1),
+            self.SUMMARY,
+            device=summary.device,
+            dtype=torch.long,
+        )
         summary = summary + self.modality_embedding(summary_modality)
         summary_mask = torch.ones(
-            batch_size, 2, device=summary.device, dtype=torch.bool
+            batch_size, 1, device=summary.device, dtype=torch.bool
         )
         summary_density = torch.ones(
-            batch_size, 2, device=summary.device, dtype=summary.dtype
+            batch_size, 1, device=summary.device, dtype=summary.dtype
         )
         summary_index = torch.full(
-            (batch_size, 2), -1, device=summary.device, dtype=torch.long
+            (batch_size, 1), -1, device=summary.device, dtype=torch.long
         )
 
-        tokens = torch.cat([summary, static[0], dynamic[0]], dim=1)
-        mask = torch.cat([summary_mask, static[1], dynamic[1]], dim=1)
-        density = torch.cat([summary_density, static[2], dynamic[2]], dim=1)
-        modality = torch.cat([summary_modality, static[3], dynamic[3]], dim=1)
-        patch_index = torch.cat([summary_index, static[4], dynamic[4]], dim=1)
+        tokens = torch.cat([summary, dynamic[0]], dim=1)
+        mask = torch.cat([summary_mask, dynamic[1]], dim=1)
+        density = torch.cat([summary_density, dynamic[2]], dim=1)
+        modality = torch.cat([summary_modality, dynamic[3]], dim=1)
+        patch_index = torch.cat([summary_index, dynamic[4]], dim=1)
 
         tokens = self.temporal_encoder(tokens, src_key_padding_mask=~mask)
         tokens = self.projector(self.output_norm(tokens))
@@ -152,7 +147,7 @@ class SparseEventTokenizer(nn.Module):
         return EventTokenBatch(tokens, mask, density, modality, patch_index)
 
     def _tokenize_stream(
-        self, voxels: torch.Tensor, modality_id: int
+        self, voxels: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
         batch_size, time_bins, _, height, width = voxels.shape
         flat = voxels.reshape(batch_size * time_bins, 2, height, width)
@@ -208,7 +203,7 @@ class SparseEventTokenizer(nn.Module):
             dim=-1,
         )
         coord_emb = self.coordinate_embedding(coordinates)
-        modality = torch.full_like(selected_idx, modality_id)
+        modality = torch.full_like(selected_idx, self.DYNAMIC)
         selected = (
             selected
             + time_emb
@@ -225,17 +220,12 @@ class SparseEventTokenizer(nn.Module):
             selected_idx.reshape(batch_size, sequence_len),
         )
 
-    def _validate_inputs(
-        self, static_voxels: torch.Tensor, dynamic_voxels: torch.Tensor
-    ) -> None:
-        if static_voxels.shape != dynamic_voxels.shape:
-            raise ValueError("static and dynamic event voxels must have equal shapes")
-        if static_voxels.ndim != 5 or static_voxels.shape[2] != 2:
+    def _validate_inputs(self, dynamic_voxels: torch.Tensor) -> None:
+        if dynamic_voxels.ndim != 5 or dynamic_voxels.shape[2] != 2:
             raise ValueError("event voxels must have shape [B, T, 2, H, W]")
-        if static_voxels.shape[1] > self.history_bins:
+        if dynamic_voxels.shape[1] > self.history_bins:
             raise ValueError(
-                f"received {static_voxels.shape[1]} bins, maximum is {self.history_bins}"
+                f"received {dynamic_voxels.shape[1]} bins, maximum is {self.history_bins}"
             )
-        if static_voxels.shape[-2] < self.patch_size or static_voxels.shape[-1] < self.patch_size:
+        if dynamic_voxels.shape[-2] < self.patch_size or dynamic_voxels.shape[-1] < self.patch_size:
             raise ValueError("event voxel resolution is smaller than patch_size")
-

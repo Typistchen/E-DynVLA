@@ -40,8 +40,6 @@ def train(cfg):
         event_history_bins=cfg.POLICY.get("EVENT_HISTORY_BINS", 8),
         event_bin_ms=cfg.DATASET.get("EVENT_BIN_MS", 10.0),
         event_output_size=cfg.DATASET.get("EVENT_OUTPUT_SIZE", (96, 128)),
-        event_future_steps=cfg.POLICY.get("WAM_FUTURE_STEPS", 10),
-        event_future_grid_size=cfg.POLICY.get("WAM_GRID_SIZE", (12, 16)),
         action_horizon=cfg.POLICY.get("CHUNK_SIZE", 20),
         rotation_format=cfg.DATASET.get("ROTATION_FORMAT", "euler"),
         **utils.datasets.get_edv_dataset_kwargs(cfg),
@@ -61,8 +59,6 @@ def train(cfg):
         event_history_bins=cfg.POLICY.get("EVENT_HISTORY_BINS", 8),
         event_bin_ms=cfg.DATASET.get("EVENT_BIN_MS", 10.0),
         event_output_size=cfg.DATASET.get("EVENT_OUTPUT_SIZE", (96, 128)),
-        event_future_steps=cfg.POLICY.get("WAM_FUTURE_STEPS", 10),
-        event_future_grid_size=cfg.POLICY.get("WAM_GRID_SIZE", (12, 16)),
         action_horizon=cfg.POLICY.get("CHUNK_SIZE", 20),
         rotation_format=cfg.DATASET.get("ROTATION_FORMAT", "euler"),
         **utils.datasets.get_edv_dataset_kwargs(cfg),
@@ -138,19 +134,14 @@ def train(cfg):
     if checkpoint:
         cfg.CONST.CKPT = checkpoint
         logging.info("Loading pretrained model from %s ..." % checkpoint)
-        # Save the normalizers to enable migration to the new datasets
-        normalizers = {
-            n: getattr(policy, n)
-            for n in [
-                "normalize_inputs",
-                "normalize_targets",
-                "unnormalize_outputs",
-            ]
-        }
+        # Keep the checkpoint's normalization buffers: they are part of the
+        # learned input/output interface the expert was trained in. The
+        # released DynamicVLA-DOM checkpoint normalizes delta actions with
+        # absolute-action statistics, so overwriting them with freshly
+        # computed dataset statistics would move the targets into a different
+        # space and destabilise the warm start.
         policy.config.device = "cuda:%d" % local_rank
         policy = policy.from_pretrained(checkpoint, config=policy.config)
-        for k, v in normalizers.items():
-            setattr(policy, k, v)
 
     if torch.cuda.is_available():
         policy = torch.nn.parallel.DistributedDataParallel(
@@ -159,10 +150,40 @@ def train(cfg):
             find_unused_parameters=True,
         )
 
-    # Set up the optimizer
+    # Set up the optimizer. Pretrained expert parameters (warm-started from
+    # the DynamicVLA checkpoint) use a smaller learning rate than the newly
+    # initialized modules (event tokenizer, MoT bridges, state encoder).
     n_batches = len(train_data_loader)
+    expert_lr = cfg.TRAIN.OPTIMIZER.get("EXPERT_LR")
+    expert_param_keys = (
+        "vlm_with_expert.lm_expert",
+        "action_in_proj",
+        "action_out_proj",
+        "action_time_mlp",
+    )
+    if expert_lr:
+        warm_params, new_params = [], []
+        for name, param in policy.named_parameters():
+            if not param.requires_grad:
+                continue
+            if any(key in name for key in expert_param_keys):
+                warm_params.append(param)
+            else:
+                new_params.append(param)
+        param_groups = [
+            {"params": new_params},
+            {"params": warm_params, "lr": float(expert_lr)},
+        ]
+        logging.info(
+            "Optimizer param groups: %d warm-start params (lr=%s), %d new params",
+            sum(p.numel() for p in warm_params),
+            expert_lr,
+            sum(p.numel() for p in new_params),
+        )
+    else:
+        param_groups = [p for p in policy.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, policy.parameters()),
+        param_groups,
         lr=cfg.TRAIN.OPTIMIZER.LR,
         eps=cfg.TRAIN.OPTIMIZER.EPS,
         weight_decay=cfg.TRAIN.OPTIMIZER.WEIGHT_DECAY,
@@ -224,7 +245,7 @@ def train(cfg):
                 batch["task"] = batch["task"][0]
 
             loss, loss_dict = policy.forward(batch)
-            for name in ("action_loss", "wam_loss", "wam_rgb_loss", "wam_event_loss"):
+            for name in ("action_loss",):
                 if name in loss_dict:
                     component_losses.setdefault(
                         name, utils.average_meter.AverageMeter()
@@ -255,9 +276,6 @@ def train(cfg):
                         for name, meter in component_losses.items()
                     }
                 )
-                for name, value in loss_dict.items():
-                    if name.startswith("wam_") and name not in component_losses:
-                        batch_scalars[f"WAM/{name.removeprefix('wam_')}"] = value
                 tb_writer.add_scalars(batch_scalars, n_itr)
                 # Save the model checkpoint every few batches
                 if (

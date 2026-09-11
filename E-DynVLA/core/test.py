@@ -35,8 +35,6 @@ def test(cfg, test_data_loader=None, policy=None):
             event_history_bins=cfg.POLICY.get("EVENT_HISTORY_BINS", 8),
             event_bin_ms=cfg.DATASET.get("EVENT_BIN_MS", 10.0),
             event_output_size=cfg.DATASET.get("EVENT_OUTPUT_SIZE", (96, 128)),
-            event_future_steps=cfg.POLICY.get("WAM_FUTURE_STEPS", 10),
-            event_future_grid_size=cfg.POLICY.get("WAM_GRID_SIZE", (12, 16)),
             action_horizon=cfg.POLICY.get("CHUNK_SIZE", 20),
             rotation_format=cfg.DATASET.get("ROTATION_FORMAT", "euler"),
             **utils.datasets.get_edv_dataset_kwargs(cfg),

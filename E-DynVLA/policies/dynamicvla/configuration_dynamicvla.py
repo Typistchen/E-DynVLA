@@ -86,14 +86,13 @@ class DynamicVLAConfig(PreTrainedConfig):
     self_attn_every_n_layers: int = 2
     # The action expert hidden size (wrt to the VLM)
     expert_width_multiplier: float = 0.75
-    # E-DynVLA sparse event-token branch. It is opt-in so existing DynamicVLA
-    # checkpoints and RGB-only experiments remain reproducible.
+    # E-DynVLA sparse dynamic-event token branch. It is opt-in so existing
+    # DynamicVLA checkpoints and RGB-only experiments remain reproducible.
     use_event_tokens: bool = False
-    static_event_key: str = "observation.events.static"
+    # Only "dynamic_only" is supported: the static event stream and all
+    # future-prediction targets were removed with the WAM.
+    event_mode: str = "dynamic_only"
     dynamic_event_key: str = "observation.events.dynamic"
-    future_event_key: str = "observation.events.future_activity"
-    future_rgb_key: str = "observation.wam.future_rgb"
-    future_rgb_valid_key: str = "observation.wam.future_rgb_valid"
     event_history_bins: int = 8
     event_input_size: tuple[int, int] = (96, 128)
     event_hidden_size: int = 256
@@ -102,17 +101,12 @@ class DynamicVLAConfig(PreTrainedConfig):
     event_num_layers: int = 2
     event_num_heads: int = 8
     event_min_patch_density: float = 1e-6
-    # Action-conditioned multimodal world model (future RGB + events).
-    wam_enabled: bool = False
-    wam_hidden_size: int = 256
-    wam_num_layers: int = 4
-    wam_num_heads: int = 8
-    wam_future_steps: int = 10
-    wam_grid_size: tuple[int, int] = (12, 16)
-    wam_loss_weight: float = 0.1
-    wam_rgb_loss_weight: float = 1.0
-    wam_event_loss_weight: float = 1.0
-    wam_positive_weight: float = 4.0
+    # Additive multi-layer MoT bridges: on cross-attention layers the expert
+    # additionally reads a gated projection of the VLM hidden states. The
+    # zero-initialized gates keep the pretrained behaviour intact at start.
+    mot_linear_bridge: bool = True
+    mot_bridge_gate_init: float = 0.0
+    mot_bridge_num_heads: int = 8
     # sensitivity range for the timestep used in sine-cosine positional encoding
     min_period: float = 4e-3
     max_period: float = 4.0
@@ -132,12 +126,10 @@ class DynamicVLAConfig(PreTrainedConfig):
                 "`use_delta_joint_actions_aloha` is used by dynamicvla for aloha real"
                 " models. It is not ported yet in LeRobot."
             )
-        if self.wam_enabled and not self.use_event_tokens:
-            raise ValueError("wam_enabled requires use_event_tokens=True")
-        if self.wam_enabled and self.wam_future_steps < 1:
-            raise ValueError("wam_future_steps must be positive")
-        if self.wam_enabled and any(v < 1 for v in self.wam_grid_size):
-            raise ValueError("wam_grid_size values must be positive")
+        if self.event_mode != "dynamic_only":
+            raise ValueError(
+                f"unsupported event_mode: {self.event_mode} (only 'dynamic_only')"
+            )
         if self.use_event_tokens and any(v < 1 for v in self.event_input_size):
             raise ValueError("event_input_size values must be positive")
 

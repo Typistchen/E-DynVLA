@@ -1,20 +1,13 @@
 import numpy as np
 import torch
 
+from policies.dynamicvla.modeling_dynamicvla import make_att_2d_masks
 from policies.edynvla.data import (
     future_frame_interpolation,
     voxelize_weighted_event_pair,
     voxelize_weighted_events,
 )
 from policies.edynvla.event_tokenizer import SparseEventTokenizer
-from policies.edynvla.event_wam import (
-    EventWAMHead,
-    WorldActionModelHead,
-    event_wam_loss,
-    event_wam_metrics,
-    multimodal_wam_loss,
-    multimodal_wam_metrics,
-)
 
 
 def test_future_rgb_interpolates_at_exact_event_horizon():
@@ -95,7 +88,7 @@ def test_paired_voxelization_matches_individual_calls():
     )
 
 
-def test_sparse_tokenizer_keeps_static_dynamic_types_and_masks_empty_patches():
+def test_sparse_tokenizer_dynamic_only_masks_empty_patches():
     tokenizer = SparseEventTokenizer(
         hidden_dim=32,
         output_dim=48,
@@ -105,113 +98,50 @@ def test_sparse_tokenizer_keeps_static_dynamic_types_and_masks_empty_patches():
         num_layers=1,
         num_heads=4,
     )
-    static = torch.zeros(2, 3, 2, 16, 16)
-    dynamic = torch.zeros_like(static)
-    static[:, 0, 0, :8, :8] = 1
+    dynamic = torch.zeros(2, 3, 2, 16, 16)
+    dynamic[:, 0, 0, :8, :8] = 1
     dynamic[:, 2, 1, 8:, 8:] = 1
-    output = tokenizer(static, dynamic)
+    output = tokenizer(dynamic)
 
-    assert output.tokens.shape == (2, 14, 48)
-    assert output.mask.shape == (2, 14)
-    assert output.mask[:, :2].all()
-    assert (output.modality[:, 2:8] == tokenizer.STATIC).all()
-    assert (output.modality[:, 8:] == tokenizer.DYNAMIC).all()
-    assert output.mask.sum(dim=1).tolist() == [4, 4]
+    # 1 dynamic summary token + history_bins * max_patches_per_bin patches.
+    assert output.tokens.shape == (2, 7, 48)
+    assert output.mask.shape == (2, 7)
+    assert output.mask[:, 0].all()
+    assert (output.modality[:, 0] == tokenizer.SUMMARY).all()
+    assert (output.modality[:, 1:] == tokenizer.DYNAMIC).all()
+    # summary + one active patch in bin 0 + one active patch in bin 2.
+    assert output.mask.sum(dim=1).tolist() == [3, 3]
     assert torch.isfinite(output.tokens).all()
-
-
-def test_event_wam_shape_and_gradient():
-    tokenizer = SparseEventTokenizer(
-        hidden_dim=32,
-        output_dim=48,
-        patch_size=8,
-        max_patches_per_bin=2,
-        history_bins=2,
-        num_layers=1,
-        num_heads=4,
-    )
-    static = torch.rand(2, 2, 2, 16, 16)
-    dynamic = torch.rand_like(static)
-    token_batch = tokenizer(static, dynamic)
-    wam = EventWAMHead(
-        token_dim=48,
-        hidden_dim=32,
-        state_dim=7,
-        action_dim=8,
-        future_steps=3,
-        output_channels=4,
-        grid_size=(2, 3),
-        num_layers=1,
-        num_heads=4,
-    )
-    logits = wam(
-        token_batch.tokens,
-        token_batch.mask,
-        torch.rand(2, 7),
-        torch.rand(2, 4, 8),
-    )
-    assert logits.shape == (2, 3, 4, 2, 3)
-    loss = event_wam_loss(logits, torch.zeros_like(logits))
-    loss.backward()
-    assert tokenizer.patch_embed.weight.grad is not None
 
 
 def test_tokenizer_rejects_wrong_event_shape():
     tokenizer = SparseEventTokenizer(hidden_dim=32, output_dim=48, num_heads=4)
     bad = torch.zeros(1, 2, 32, 32)
     try:
-        tokenizer(bad, bad)
+        tokenizer(bad)
     except ValueError as exc:
         assert "[B, T, 2, H, W]" in str(exc)
     else:
         raise AssertionError("expected invalid event shape to fail")
 
 
-def test_multimodal_wam_predicts_rgb_and_event_and_backpropagates():
-    wam = WorldActionModelHead(
-        context_dim=48,
-        hidden_dim=32,
-        action_dim=8,
-        future_steps=3,
-        grid_size=(2, 3),
-        num_layers=1,
-        num_heads=4,
+def test_suffix_attention_blocks_keep_state_isolated_from_actions():
+    # Layout: 3 prefix tokens, 1 state token, 20 action tokens with the
+    # action chunk forming one bidirectional block.
+    att_masks = torch.tensor(
+        [[0, 0, 0, 1, 1] + [0] * 19], dtype=torch.float32
     )
-    context = torch.rand(2, 7, 48, requires_grad=True)
-    output = wam(
-        context,
-        torch.ones(2, 7, dtype=torch.bool),
-        torch.rand(2, 4, 8),
-        action_mask=torch.tensor([[1, 1, 1, 0], [1, 1, 1, 1]]),
-    )
-    assert output.rgb.shape == (2, 3, 2, 3)
-    assert output.event_logits.shape == (2, 3, 4, 2, 3)
-    assert output.rgb.min() >= 0 and output.rgb.max() <= 1
+    pad_masks = torch.ones(1, 24, dtype=torch.bool)
+    att_2d = make_att_2d_masks(pad_masks, att_masks)
 
-    loss, parts = multimodal_wam_loss(
-        output,
-        torch.rand_like(output.rgb),
-        torch.zeros_like(output.event_logits),
-        rgb_valid_mask=torch.tensor([True, False]),
-    )
-    loss.backward()
-    assert set(parts) == {"rgb_loss", "event_loss"}
-    assert context.grad is not None
-    metrics = multimodal_wam_metrics(
-        output,
-        torch.rand_like(output.rgb),
-        torch.zeros_like(output.event_logits),
-        rgb_valid_mask=torch.tensor([True, False]),
-    )
-    assert "rgb_psnr_db" in metrics
-    assert "event_f1" in metrics
-
-
-def test_event_wam_metrics_are_exact_for_separable_logits():
-    target = torch.tensor([[[[[0.0, 1.0]]]]])
-    logits = torch.tensor([[[[[-10.0, 10.0]]]]])
-    metrics = event_wam_metrics(logits, target)
-    assert metrics["precision"] == 1
-    assert metrics["recall"] == 1
-    assert metrics["f1"] == 1
-    assert metrics["iou"] == 1
+    # Prefix sees only the prefix.
+    assert att_2d[0, :3, :3].all()
+    assert not att_2d[0, :3, 3:].any()
+    # State sees the prefix and itself, never the actions.
+    assert att_2d[0, 3, :4].all()
+    assert not att_2d[0, 3, 4:].any()
+    # Actions see the prefix, the state and every other action.
+    assert att_2d[0, 4:, :4].all()
+    assert att_2d[0, 4:, 4:].all()
+    # Bidirectional within the action block.
+    assert att_2d[0, 4, 5] and att_2d[0, 5, 4]

@@ -22,16 +22,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
-from torch.nn import functional as F
 
 from policies.edynvla.data import (
     DYNAMIC_EVENT_KEY,
-    STATIC_EVENT_KEY,
     EventWindowConfig,
-    FUTURE_RGB_KEY,
-    FUTURE_RGB_VALID_KEY,
     SeparatedEventWindowReader,
-    future_frame_interpolation,
 )
 
 
@@ -483,6 +478,10 @@ class EDVSupportDataset(torch.utils.data.Dataset):
             self.event_config = replace(
                 self.event_config, event_code_root=event_code_root
             )
+        # E-DynVLA trains on the dynamic stream only; the static stream and
+        # future-activity targets were removed with the WAM.
+        if not self.event_config.dynamic_only:
+            self.event_config = replace(self.event_config, dynamic_only=True)
         self.event_cache_root = Path(
             event_cache_root or self.root / "derived_cache" / "events"
         )
@@ -734,28 +733,6 @@ class EDVSupportDataset(torch.utils.data.Dataset):
             parquet["state"][frame_index]
         )
 
-        future_left, future_right, future_alpha, future_valid = (
-            future_frame_interpolation(
-                frame_index,
-                future_steps=self.event_config.future_steps,
-                bin_seconds=self.event_config.bin_seconds,
-                fps=self.event_config.fps,
-                n_frames=n_frames,
-            )
-        )
-        future_rgb = self._video_frame(
-            bundle, self.event_config.sensor, future_left
-        ).astype(np.float32)
-        if future_right != future_left:
-            right_rgb = self._video_frame(
-                bundle, self.event_config.sensor, future_right
-            ).astype(np.float32)
-            future_rgb = (1.0 - future_alpha) * future_rgb + future_alpha * right_rgb
-        sample_data[FUTURE_RGB_KEY] = (
-            torch.from_numpy(future_rgb).permute(2, 0, 1).float() / 255.0
-        )
-        sample_data[FUTURE_RGB_VALID_KEY] = torch.tensor(future_valid)
-
         actions = parquet["action"][frame_index : frame_index + self.action_horizon]
         valid_count = len(actions)
         if valid_count < self.action_horizon:
@@ -781,14 +758,7 @@ class EDVSupportDataset(torch.utils.data.Dataset):
                 )
             )
         if self.image_transforms is not None:
-            sample_data = self.image_transforms(
-                sample_data, [*self.camera_keys, FUTURE_RGB_KEY]
-            )
-        sample_data[FUTURE_RGB_KEY] = F.interpolate(
-            sample_data[FUTURE_RGB_KEY][None],
-            size=self.event_config.future_grid_size,
-            mode="area",
-        )[0]
+            sample_data = self.image_transforms(sample_data, self.camera_keys)
         return sample_data
 
     def close(self) -> None:

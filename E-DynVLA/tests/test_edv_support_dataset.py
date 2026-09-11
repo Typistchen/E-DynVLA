@@ -139,13 +139,9 @@ class TestEDVSupportDatasetIntegration:
             "observation.images.opst_cam",
             "observation.images.wrist_cam",
             "observation.state",
-            "observation.wam.future_rgb",
-            "observation.wam.future_rgb_valid",
             "action",
             "actions_id_pad",
-            "observation.events.static",
             "observation.events.dynamic",
-            "observation.events.future_activity",
             "task",
             "episode_index",
             "frame_index",
@@ -158,11 +154,7 @@ class TestEDVSupportDatasetIntegration:
         assert sample["observation.state"].shape == (6,)
         assert sample["action"].shape == (20, 7)
         assert sample["actions_id_pad"].dtype == torch.bool
-        assert sample["observation.events.static"].shape == (8, 2, 96, 128)
         assert sample["observation.events.dynamic"].shape == (8, 2, 96, 128)
-        assert sample["observation.events.future_activity"].shape == (10, 4, 12, 16)
-        assert sample["observation.events.future_activity"].max() <= 1.0
-        assert sample["observation.wam.future_rgb"].shape == (3, 12, 16)
         assert "Pick up the" in sample["task"]
 
     def test_same_episode_samples_share_bundle(self, dataset):

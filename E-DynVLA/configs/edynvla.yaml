@@ -1,19 +1,19 @@
-# E-DynVLA: DOM RGB/state/language + separated event tokens + RGB/Event WAM.
+# E-DynVLA: DOM RGB/language + dynamic event tokens + MoT action expert.
 CONST:
-  EXP_NAME: edynvla_event_tokens
+  EXP_NAME: edynvla_dynamic
   N_WORKERS: 8
 
 DATASET:
   NAME: hzxie/dynamic-objects
   # EDV-Support (edv-4.0) mode: point this at the dataset root (or export
   # EDV_SUPPORT_ROOT). Raw AEDAT4 events are separated once into a versioned
-  # stored-q cache; steady-state training only reads the cache.
+  # stored-q cache; steady-state training only reads the dynamic stream.
   # When set, it takes precedence over EVENT_MANIFEST below.
   EDV_SUPPORT_ROOT:
   # Derived per-sample event-H5 cache with x/y/t/p and separation confidence.
   # Defaults to <EDV_SUPPORT_ROOT>/derived_cache/events when empty.
   EDV_CACHE_ROOT:
-  # Camera whose events and WAM future-RGB targets are used.
+  # Camera whose dynamic events are tokenized.
   EVENT_SENSOR: wrist_cam
   EDV_TEST_EVERY: 10
   EDV_EXCLUDE_FAILURES: true
@@ -21,9 +21,6 @@ DATASET:
   # (scripts/separate_dynamic_static_events.py). Defaults to ../V2E-VLA.
   V2E_VLA_ROOT:
   # Legacy DOM + separated-event HDF5 mode (superseded by EDV_SUPPORT_ROOT).
-  # Raw DOM and eventized DOM files are aligned through the manifest generated
-  # by scripts/build_edynvla_manifest.py. Segmentation/object_vel are metrics
-  # only and are never listed as model features.
   EVENT_MANIFEST: ../benchmark/manifests/dom_event_10demo.json
   # Set this in the shell instead of committing a machine-specific path:
   # export EDYNVLA_DATA_ROOT=/path/to/motion_separation_10
@@ -44,7 +41,10 @@ DATASET:
 
 POLICY:
   TYPE: dynamicvla
-  CHECKPOINT:
+  # Warm start from the author-released DynamicVLA-DOM checkpoint
+  # (FastViT + connector + SmolLM2 + action expert). Required because the
+  # backbone is frozen.
+  CHECKPOINT: ../checkpoints/dynamic-vla-DOM
   N_OBS_STEPS: 2
   CHUNK_SIZE: 20
   N_ACTION_STEPS: 20
@@ -58,7 +58,10 @@ POLICY:
   FREEZE_CONNECTOR: true
   FREEZE_TEXT_MODEL: true
 
+  # Dynamic-only event tokens: the static stream and the future-prediction
+  # WAM were removed; the tokenizer is single-stream.
   USE_EVENT_TOKENS: true
+  EVENT_MODE: dynamic_only
   EVENT_HISTORY_BINS: 8
   EVENT_INPUT_SIZE: [96, 128]
   EVENT_HIDDEN_SIZE: 256
@@ -68,16 +71,11 @@ POLICY:
   EVENT_NUM_HEADS: 8
   EVENT_MIN_PATCH_DENSITY: 1.0e-6
 
-  WAM_ENABLED: true
-  WAM_HIDDEN_SIZE: 256
-  WAM_NUM_LAYERS: 4
-  WAM_NUM_HEADS: 8
-  WAM_FUTURE_STEPS: 10
-  WAM_GRID_SIZE: [12, 16]
-  WAM_LOSS_WEIGHT: 0.1
-  WAM_RGB_LOSS_WEIGHT: 1.0
-  WAM_EVENT_LOSS_WEIGHT: 1.0
-  WAM_POSITIVE_WEIGHT: 4.0
+  # Additive multi-layer MoT bridges (zero-init gates keep the pretrained
+  # expert behaviour intact at the start of finetuning).
+  MOT_LINEAR_BRIDGE: true
+  MOT_BRIDGE_GATE_INIT: 0.0
+  MOT_BRIDGE_NUM_HEADS: 8
 
 DIR:
   OUTPUT: ./runs
@@ -100,6 +98,9 @@ TRAIN:
     BATCH: 0
   OPTIMIZER:
     LR: 1.0e-4
+    # Warm-started expert parameters use a smaller LR to limit drift from
+    # the pretrained checkpoint. Remove to train everything at LR.
+    EXPERT_LR: 2.5e-5
     EPS: 1.0e-8
     WEIGHT_DECAY: 1.0e-10
     BETAS: [0.9, 0.95]
