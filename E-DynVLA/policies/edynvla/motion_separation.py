@@ -181,12 +181,20 @@ class RawEventMotionSeparator:
         frame_index = np.clip(frame_index, 0, len(rgb_frames) - 1)
         x_clipped = np.clip(x, 0, width - 1)
         y_clipped = np.clip(y, 0, height - 1)
-        for frame in np.unique(frame_index):
-            maps = self.confidence_maps(int(frame), rgb_frames)
-            selected = frame_index == frame
-            q_static[selected] = maps["q_static"][y_clipped[selected], x_clipped[selected]]
-            q_dynamic[selected] = maps["q_dynamic"][y_clipped[selected], x_clipped[selected]]
-            q_illumination[selected] = maps["q_illumination"][y_clipped[selected], x_clipped[selected]]
+        # Events are timestamp sorted. Work on contiguous slices instead of
+        # allocating an N-event boolean mask once per video frame (O(F*N)).
+        frame_starts = np.flatnonzero(
+            np.r_[True, frame_index[1:] != frame_index[:-1]]
+        )
+        frame_ends = np.r_[frame_starts[1:], n_events]
+        for lo, hi in zip(frame_starts, frame_ends, strict=True):
+            frame = int(frame_index[lo])
+            maps = self.confidence_maps(frame, rgb_frames)
+            yy = y_clipped[lo:hi]
+            xx = x_clipped[lo:hi]
+            q_static[lo:hi] = maps["q_static"][yy, xx]
+            q_dynamic[lo:hi] = maps["q_dynamic"][yy, xx]
+            q_illumination[lo:hi] = maps["q_illumination"][yy, xx]
         return q_static, q_dynamic, q_illumination
 
     def _neutral_maps(self, frame_index: int) -> dict[str, np.ndarray]:

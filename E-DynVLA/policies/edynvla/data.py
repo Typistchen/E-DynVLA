@@ -47,6 +47,27 @@ class EventWindowConfig:
         return self.bin_ms / 1000.0
 
 
+def future_frame_interpolation(
+    frame_index: int,
+    *,
+    future_steps: int,
+    bin_seconds: float,
+    fps: float,
+    n_frames: int,
+) -> tuple[int, int, float, bool]:
+    """Two RGB frame indices and blend weight at the exact WAM horizon."""
+    if n_frames < 1:
+        raise ValueError("n_frames must be positive")
+    position = frame_index + future_steps * bin_seconds * fps
+    left = int(np.floor(position))
+    right = int(np.ceil(position))
+    valid = right < n_frames
+    left = min(max(left, 0), n_frames - 1)
+    right = min(max(right, 0), n_frames - 1)
+    alpha = float(position - np.floor(position)) if valid else 0.0
+    return left, right, alpha, valid
+
+
 def _event_window_indices(
     *,
     x: np.ndarray,
@@ -490,24 +511,32 @@ class DOMEventDataset(torch.utils.data.Dataset):
             state = self._state_array(dom, slice(frame_index, frame_index + 1))[0]
             sample["observation.state"] = torch.from_numpy(state)
             n_frames = int(dom["action"].shape[0])
-            future_offset = max(
-                1,
-                round(
-                    self.event_config.future_steps
-                    * self.event_config.bin_seconds
-                    * self.event_config.fps
-                ),
+            future_left, future_right, future_alpha, future_valid = (
+                future_frame_interpolation(
+                    frame_index,
+                    future_steps=self.event_config.future_steps,
+                    bin_seconds=self.event_config.bin_seconds,
+                    fps=self.event_config.fps,
+                    n_frames=n_frames,
+                )
             )
-            future_index = frame_index + future_offset
-            clamped_future_index = min(future_index, n_frames - 1)
             future_rgb = np.asarray(
-                dom[f"{self.event_config.sensor}_rgb"][clamped_future_index]
-            )
+                dom[f"{self.event_config.sensor}_rgb"][future_left], dtype=np.float32
+            ).copy()
+            if future_right != future_left:
+                right_rgb = np.asarray(
+                    dom[f"{self.event_config.sensor}_rgb"][future_right],
+                    dtype=np.float32,
+                )
+                future_rgb = (
+                    (1.0 - future_alpha) * future_rgb
+                    + future_alpha * right_rgb
+                )
             future_rgb = (
-                torch.from_numpy(future_rgb.copy()).permute(2, 0, 1).float() / 255.0
+                torch.from_numpy(future_rgb).permute(2, 0, 1).float() / 255.0
             )
             sample[FUTURE_RGB_KEY] = future_rgb
-            sample[FUTURE_RGB_VALID_KEY] = torch.tensor(future_index < n_frames)
+            sample[FUTURE_RGB_VALID_KEY] = torch.tensor(future_valid)
             valid_actions = self._action_array(np.asarray(
                 dom["action"][frame_index : frame_index + self.action_horizon],
                 dtype=np.float32,

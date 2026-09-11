@@ -9,7 +9,7 @@
 
 ## 1. 先看当前状态
 
-仓库目前有两条已经实现、但数据接口尚未完全统一的链路。
+仓库目前的数据生成、事件分离和训练接口已经统一。
 
 ### 1.1 当前批量数据生成链路
 
@@ -30,33 +30,21 @@ DOM / Isaac Lab
 ### 1.2 当前训练链路
 
 ```text
-旧版 DOM episode HDF5
-  + 已完成动静分离的 Event HDF5
-      (q_static/q_dynamic/q_illumination)
-  -> observation 对齐 voxel
+Parquet + 两路 RGB MP4 + wrist AEDAT4 + wrist support HDF5
+  -> 首次预处理：动静/光照分离并保存带版本指纹的 q 缓存
+  -> 训练读取：按 observation 截取 80ms Event
+  -> static/dynamic voxel
   -> Event Token
-  -> DynamicVLA + Event-WAM
+  -> DynamicVLA + RGB/Event WAM
 ```
 
-因此，**当前 500GB EDV 数据还不能直接交给现有训练 DataLoader**。缺少的不是
-VLA 模型，而是一个新的数据适配层：
+正式训练使用 `EDVSupportDataset`。Raw AEDAT4 仍是可复现的源数据；缓存保存
+`q_static/q_dynamic/q_illumination`，分离算法或输入文件发生变化时会自动失效。
+建议在启动多卡训练前先运行 `scripts/precompute_edv_event_cache.py`，不要让多个
+DataLoader worker 在首个 epoch 同时生成大缓存。
 
-```text
-Parquet + MP4 + AEDAT4
-  -> 按 Parquet observation timestamp 截取 Event 窗口
-  -> 动静/光照分离
-  -> 定长 static/dynamic voxel
-  -> 现有 Event Tokenizer
-```
-
-此外，当前几何版分离器需要 `depth + camera pose + observed motion`。这些数据存在
-于仿真阶段的临时 HDF5，但没有进入最终 EDV sample。正式训练前需要选择一种实现：
-
-- 离线方案：生成 sample 时完成分离，并额外保存定长 voxel；
-- 在线方案：保留 raw AEDAT4，同时保存深度/位姿等必要观测，训练读取时分离；
-- 真实部署方案：用 RGB/Event flow 或 RGB-D scene flow 替代 Isaac motion vector。
-
-这三者中，raw AEDAT4 应继续保留；它是最原始、最可复用的数据。
+当前训练只使用 wrist Event/support；三路 support 都保留在数据集中，便于后续扩展。
+真实部署仍需由在线传感器模块产生同样的 static/dynamic voxel。
 
 ## 2. 仓库结构
 
@@ -349,9 +337,16 @@ get_dataset()
 
 ### 6.3 数据适配器
 
-文件：[`E-DynVLA/policies/edynvla/data.py`](../E-DynVLA/policies/edynvla/data.py)
+主文件：
 
-当前 `DOMEventDataset` 读取旧版 DOM HDF5 和分离后的 Event HDF5。
+- [`E-DynVLA/policies/edynvla/edv_support.py`](../E-DynVLA/policies/edynvla/edv_support.py)：读取 EDV sample、生成/验证缓存、读取 RGB/Parquet；
+- [`E-DynVLA/policies/edynvla/data.py`](../E-DynVLA/policies/edynvla/data.py)：Event 时间窗口和 voxel 化；
+- [`E-DynVLA/policies/edynvla/motion_separation.py`](../E-DynVLA/policies/edynvla/motion_separation.py)：调用 V2E-VLA 分离器。
+
+`EDVSupportDataset` 直接读取当前的 `Parquet + MP4 + AEDAT4 + support HDF5`。
+首次预处理把每个 raw event 的三种软置信度写入派生 HDF5。缓存包含输入文件信息、
+算法代码哈希和 schema 版本；稳定训练阶段不会再次运行几何分离。
+
 `SeparatedEventWindowReader.frame(frame_index)` 的对齐方式是：
 
 ```text
@@ -381,6 +376,8 @@ observation.events.future_activity [10, 4, 12, 16]
 ```
 
 四个通道依次是 static-OFF、static-ON、dynamic-OFF、dynamic-ON。
+
+旧的 `DOMEventDataset` 仅保留给十个 demo 的 HDF5 对照实验使用。
 
 ## 7. Event 怎样变成 Token
 
@@ -450,23 +447,25 @@ action loss = MSE(predicted velocity, u_t)
 
 文件：[`E-DynVLA/policies/edynvla/event_wam.py`](../E-DynVLA/policies/edynvla/event_wam.py)
 
-Event-WAM 不是视频生成器。它是训练期的短时世界模型辅助头：
+当前 WAM 不是全分辨率视频生成器。它是训练期的短时世界模型辅助头：
 
 ```text
-Event tokens + robot state + action context
+RGB/Event/语言/状态共享上下文 + action context
   -> Transformer Decoder
-  -> 未来 10×10ms 的四通道 patch activity
+  -> 未来 100ms 的 12×16 RGB
+  -> 未来 10×10ms 的四通道 Event patch activity
 ```
 
 总损失为：
 
 ```text
 total loss = action flow-matching loss
-           + EVENT_WAM_LOSS_WEIGHT * event WAM BCE loss
+           + WAM_LOSS_WEIGHT * (RGB Smooth-L1 + Event BCE)
 ```
 
 默认权重是 `0.1`，正样本权重是 `4.0`，用于缓解未来事件图稀疏造成的正负不平衡。
-关闭 `EVENT_WAM_ENABLED` 即可做消融实验。
+关闭 `WAM_ENABLED` 即可做消融实验。训练时 WAM 使用真实 action chunk；推理时可以
+用预测 action chunk 调用 `predict_action_chunk_with_world()` 查看未来世界预测。
 
 ## 10. 训练配置怎么读
 
@@ -486,8 +485,8 @@ total loss = action flow-matching loss
 | `EVENT_OUTPUT_SIZE` | 96×128 | voxel 空间分辨率 |
 | `EVENT_PATCH_SIZE` | 16 | Event patch 大小 |
 | `EVENT_MAX_PATCHES_PER_BIN` | 8 | 每个 bin/类型保留 patch 数 |
-| `EVENT_WAM_ENABLED` | true | 开启未来事件辅助任务 |
-| `EVENT_WAM_LOSS_WEIGHT` | 0.1 | WAM loss 权重 |
+| `WAM_ENABLED` | true | 开启未来 RGB/Event 辅助任务 |
+| `WAM_LOSS_WEIGHT` | 0.1 | WAM loss 权重 |
 | `BATCH_SIZE` | 16 | 每张卡的 batch 大小 |
 | `GRAD_ACCUM_STEPS` | 2 | 梯度累积步数 |
 
@@ -534,15 +533,18 @@ Event Tokenizer 和 Event-WAM。正式训练时仍需根据显存核对真实可
 
 ## 13. 正式训练前的代码清单
 
-必须完成：
+训练前执行：
 
-1. 为新 EDV sample 实现 `Parquet + MP4 + AEDAT4` DataLoader；
-2. 按 Parquet timestamp 截取 AEDAT4 event window；
-3. 明确分离器所需 depth/pose/flow 的保存或在线估计方式；
-4. 把分离结果转成现有 `[8,2,96,128]` static/dynamic voxel；
-5. 用 5 个 smoke-test sample 完成 DataLoader → model forward；
-6. 检查 action/state 维度、Euler 顺序、delta action 和 padding；
-7. 再进行完整训练，而不是直接把 500GB 数据交给旧 manifest loader。
+1. 设置 `EDV_SUPPORT_ROOT`、`V2E_VLA_ROOT` 和可写的 `EDV_CACHE_ROOT`；
+2. 单进程运行 `scripts/precompute_edv_event_cache.py`；
+3. 运行 `pytest -q tests` 和至少一个 DataLoader → model forward smoke test；
+4. 用 `--ckpt` 指定 DynamicVLA 预训练权重，冻结主干时禁止随机初始化；
+5. 核对两张训练卡、batch size、缓存盘容量和 train/test 数量；
+6. 先训练一个短 epoch，检查 action、WAM RGB 和 WAM Event loss 都能正常下降。
+
+推理输入必须包含当前时刻的 `observation.events.static` 和
+`observation.events.dynamic`。真实相机或仿真服务需要在发送 observation 前完成在线
+窗口聚合；推理脚本不会凭空从 RGB 恢复 Event。
 
 建议保留以下消融：RGB only、RGB+raw Event、RGB+static、RGB+dynamic、
 RGB+static+dynamic、RGB+static+dynamic+Event-WAM。

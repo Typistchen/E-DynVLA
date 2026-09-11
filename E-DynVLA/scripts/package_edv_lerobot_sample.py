@@ -696,7 +696,7 @@ def main() -> None:
             "motion_separation_support": {
                 "format": "HDF5",
                 "used_for": (
-                    "online/static-dynamic event separation from raw events"
+                    "offline cached or online static-dynamic separation from raw events"
                 ),
                 "cameras": {
                     camera: {

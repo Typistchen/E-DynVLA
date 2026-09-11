@@ -8,6 +8,7 @@ import torch
 from policies.edynvla.edv_support import (
     EDVSupportDataset,
     event_h5_has_confidence,
+    separation_cache_fingerprint,
     select_edv_samples,
 )
 
@@ -37,9 +38,9 @@ def test_select_edv_samples_excludes_failures_and_splits_every_nth():
     test = select_edv_samples(
         samples, split="test", test_every=10, exclude_failures=True, sample_exists=exists
     )
-    # The position counter skips the failed sample, so the first test sample
-    # is the 10th surviving candidate.
-    assert [s["sample_index"] for s in test] == [10, 20]
+    # Split membership is based on stable sample_index, not on which neighboring
+    # files happen to be present locally.
+    assert [s["sample_index"] for s in test] == [9, 19]
     assert 3 not in [s["sample_index"] for s in train + test]
     assert len(train) == 22
 
@@ -53,8 +54,7 @@ def test_select_edv_samples_honors_explicit_split_assignment():
     test = select_edv_samples(
         samples, split="test", test_every=2, exclude_failures=True, sample_exists=exists
     )
-    # Sample 1 is explicitly test; sample 2 sits at position 2, which is not
-    # a (position+1) % 2 == 0 test slot, so it stays in train.
+    # Explicit assignments win. Unassigned sample 2 is deterministically train.
     assert [s["sample_index"] for s in train] == [0, 2]
     assert [s["sample_index"] for s in test] == [1]
 
@@ -66,6 +66,38 @@ def test_select_edv_samples_skips_missing_directories():
         samples, split="train", test_every=10, exclude_failures=True, sample_exists=exists
     )
     assert [s["sample_index"] for s in train] == [0, 2]
+
+
+def test_separation_cache_fingerprint_changes_with_source(tmp_path):
+    events = tmp_path / "wrist_cam.aedat4"
+    support = tmp_path / "wrist_cam_motion_support.h5"
+    rgb = tmp_path / "wrist_cam.mp4"
+    v2e = tmp_path / "V2E-VLA" / "scripts"
+    v2e.mkdir(parents=True)
+    separator = v2e / "separate_dynamic_static_events.py"
+    for path, content in (
+        (events, b"events"),
+        (support, b"support"),
+        (rgb, b"rgb"),
+        (separator, b"separator-v1"),
+    ):
+        path.write_bytes(content)
+
+    kwargs = dict(
+        aedat4_path=events,
+        support_h5_path=support,
+        rgb_path=rgb,
+        event_code_root=v2e.parent,
+        sensor="wrist_cam",
+        time_origin_s=0.0,
+        expected_count=10,
+        source_size=(360, 480),
+        fps=25.0,
+    )
+    first, _ = separation_cache_fingerprint(**kwargs)
+    separator.write_bytes(b"separator-v2")
+    second, _ = separation_cache_fingerprint(**kwargs)
+    assert first != second
 
 
 def _missing_requirements():

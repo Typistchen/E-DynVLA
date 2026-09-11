@@ -6,10 +6,11 @@ CONST:
 DATASET:
   NAME: hzxie/dynamic-objects
   # EDV-Support (edv-4.0) mode: point this at the dataset root (or export
-  # EDV_SUPPORT_ROOT) and the raw AEDAT4 events are separated at read time.
+  # EDV_SUPPORT_ROOT). Raw AEDAT4 events are separated once into a versioned
+  # stored-q cache; steady-state training only reads the cache.
   # When set, it takes precedence over EVENT_MANIFEST below.
   EDV_SUPPORT_ROOT:
-  # Derived per-sample event-H5 cache for the AEDAT4 -> HDF5 conversion.
+  # Derived per-sample event-H5 cache with x/y/t/p and separation confidence.
   # Defaults to <EDV_SUPPORT_ROOT>/derived_cache/events when empty.
   EDV_CACHE_ROOT:
   # Camera whose events and WAM future-RGB targets are used.
@@ -59,6 +60,7 @@ POLICY:
 
   USE_EVENT_TOKENS: true
   EVENT_HISTORY_BINS: 8
+  EVENT_INPUT_SIZE: [96, 128]
   EVENT_HIDDEN_SIZE: 256
   EVENT_PATCH_SIZE: 16
   EVENT_MAX_PATCHES_PER_BIN: 8

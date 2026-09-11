@@ -27,6 +27,10 @@ sys.path.append(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), os.path.pardir)
 )
 import utils.helpers
+from policies.edynvla.data import DYNAMIC_EVENT_KEY, STATIC_EVENT_KEY
+
+
+EVENT_INPUT_KEYS = (STATIC_EVENT_KEY, DYNAMIC_EVENT_KEY)
 
 
 def get_vla_model(pretrained_model, use_delta_action, streaming):
@@ -269,6 +273,16 @@ def _get_action(vla_model, observations, rotation, use_delta_action, debug=False
             if ifk not in observation:
                 logging.warning("Ignoring observation without key: %s" % ifk)
                 return None
+    if vla_model.config.use_event_tokens:
+        missing_events = [
+            key for key in EVENT_INPUT_KEYS if key not in observations[-1]
+        ]
+        if missing_events:
+            logging.warning(
+                "E-DynVLA requires the latest static/dynamic event voxels: %s",
+                missing_events,
+            )
+            return None
 
     setattr(_get_action, "count", _count + 1)
     # Skip the first few steps to allow model to warm up
@@ -325,7 +339,9 @@ def _get_transformed_observations(observations, rotation, feat_cfg, device="cuda
             tr_observations[k].append(v)
 
     tr_observations = {
-        k: torch.stack(v, dim=1) for k, v in tr_observations.items() if k != "task"
+        k: (v[-1] if k in EVENT_INPUT_KEYS else torch.stack(v, dim=1))
+        for k, v in tr_observations.items()
+        if k != "task"
     }
     for k in ["task", "index", "dt_scale"]:
         tr_observations[k] = observations[-1][k] if k in observations[-1] else None
@@ -349,6 +365,25 @@ def _get_transformed_observation(observation, rotation, feat_cfg, device="cuda")
         axis=-1,
     ).astype(np.float32)
 
+    event_voxels = {}
+    for key in EVENT_INPUT_KEYS:
+        if key not in observation:
+            continue
+        value = observation[key]
+        tensor = (
+            value.to(device=device, dtype=torch.float32)
+            if isinstance(value, torch.Tensor)
+            else torch.as_tensor(value, dtype=torch.float32, device=device)
+        )
+        if tensor.ndim == 4:
+            tensor = tensor.unsqueeze(0)
+        if tensor.ndim != 5 or tensor.shape[2] != 2:
+            raise ValueError(
+                f"{key} must have shape [B,T,2,H,W] or [T,2,H,W], "
+                f"received {tuple(tensor.shape)}"
+            )
+        event_voxels[key] = tensor
+
     return {
         **{
             k: F.resize(
@@ -358,6 +393,7 @@ def _get_transformed_observation(observation, rotation, feat_cfg, device="cuda")
             for k, v in images.items()
         },
         "observation.state": torch.from_numpy(ee_pose).to(device),
+        **event_voxels,
         "task": [observation["task"]],
     }
 

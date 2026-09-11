@@ -2,15 +2,16 @@
 
 Reads the per-sample EDV layout directly (RGB mp4 + parquet + raw AEDAT4
 events + motion-separation support HDF5) and returns samples with the exact
-same contract as ``DOMEventDataset``, so the policy and training code are
-unchanged.  Raw events are kept raw on disk; static/dynamic separation runs
-at read time through ``RawEventMotionSeparator`` via
-``SeparatedEventWindowReader``.
+same contract as ``DOMEventDataset``. Raw events remain the source of truth;
+static/dynamic confidence is generated once into a versioned HDF5 cache and
+reused by steady-state training.
 """
 
 from __future__ import annotations
 
 import bisect
+from contextlib import contextmanager
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from policies.edynvla.data import (
     FUTURE_RGB_KEY,
     FUTURE_RGB_VALID_KEY,
     SeparatedEventWindowReader,
+    future_frame_interpolation,
 )
 
 
@@ -38,6 +40,83 @@ logger = logging.getLogger(__name__)
 # Coarse timestamp index stride: the reader binary-searches this tiny array
 # instead of loading the full (possibly 80M+ entry) timestamp dataset.
 TIME_INDEX_STEP = 16384
+SEPARATION_CACHE_SCHEMA_VERSION = 2
+
+
+def _sha256_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_signature(path: Path) -> dict:
+    if not path.is_file():
+        return {"name": path.name, "missing": True}
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def separation_cache_fingerprint(
+    *,
+    aedat4_path: Path,
+    support_h5_path: Path,
+    rgb_path: Path,
+    event_code_root: str | Path | None,
+    sensor: str,
+    time_origin_s: float,
+    expected_count: int | None,
+    source_size: tuple[int, int],
+    fps: float,
+) -> tuple[str, dict]:
+    """Fingerprint every input that can change per-event separation labels."""
+    separator_path = (
+        Path(event_code_root) / "scripts" / "separate_dynamic_static_events.py"
+        if event_code_root is not None
+        else Path("missing-separator")
+    )
+    wrapper_path = Path(__file__).with_name("motion_separation.py")
+    metadata = {
+        "schema_version": SEPARATION_CACHE_SCHEMA_VERSION,
+        "algorithm": "lighting_suppressed_streaming_motion_separator",
+        "sensor": sensor,
+        "time_origin_s": float(time_origin_s),
+        "expected_count": expected_count,
+        "source_size": list(source_size),
+        "fps": float(fps),
+        "sources": {
+            "events": _file_signature(aedat4_path),
+            "support": _file_signature(support_h5_path),
+            "rgb": _file_signature(rgb_path),
+        },
+        "separator_sha256": _sha256_file(separator_path),
+        "wrapper_sha256": _sha256_file(wrapper_path),
+    }
+    encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest(), metadata
+
+
+@contextmanager
+def event_cache_lock(cache_path: str | Path):
+    """Serialize cache creation across DataLoader workers and DDP ranks."""
+    import fcntl
+
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_path.with_suffix(cache_path.suffix + ".lock")
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _write_event_group(output, sensor: str, events: dict) -> None:
@@ -115,8 +194,10 @@ def read_aedat4_events(path: str | Path, expected_count: int | None = None) -> d
             "t": np.concatenate(ts) if ts else np.empty(0, np.float32),
             "p": np.concatenate(ps) if ps else np.empty(0, np.int8),
         }
-    order = np.argsort(result["t"], kind="stable")
-    return {key: value[order] for key, value in result.items()}
+    if len(result["t"]) > 1 and np.any(result["t"][1:] < result["t"][:-1]):
+        order = np.argsort(result["t"], kind="stable")
+        result = {key: value[order] for key, value in result.items()}
+    return result
 
 
 def ensure_event_h5(
@@ -132,7 +213,16 @@ def ensure_event_h5(
 
     cache_path = Path(cache_path)
     if cache_path.is_file():
-        return cache_path
+        try:
+            with h5py.File(cache_path, "r") as handle:
+                group = handle.get(f"DVS/{sensor}")
+                required = ("x", "y", "t", "p")
+                if group is not None and all(key in group for key in required):
+                    lengths = {int(group[key].shape[0]) for key in required}
+                    if len(lengths) == 1:
+                        return cache_path
+        except OSError:
+            logger.warning("Rebuilding unreadable event cache: %s", cache_path)
     events = read_aedat4_events(aedat4_path, expected_count=expected_count)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = cache_path.with_suffix(cache_path.suffix + f".tmp{os.getpid()}")
@@ -149,16 +239,41 @@ def ensure_event_h5(
     return cache_path
 
 
-def event_h5_has_confidence(path: str | Path, sensor: str) -> bool:
+def event_h5_has_confidence(
+    path: str | Path,
+    sensor: str,
+    expected_fingerprint: str | None = None,
+) -> bool:
     """True when the cached event H5 stores per-event separation confidences."""
     import h5py
 
     path = Path(path)
     if not path.is_file():
         return False
-    with h5py.File(path, "r") as handle:
-        group = handle.get(f"DVS/{sensor}")
-        return group is not None and "q_static" in group
+    try:
+        with h5py.File(path, "r") as handle:
+            group = handle.get(f"DVS/{sensor}")
+            required = (
+                "x",
+                "y",
+                "t",
+                "p",
+                "q_static",
+                "q_dynamic",
+                "q_illumination",
+            )
+            if group is None or any(key not in group for key in required):
+                return False
+            lengths = {int(group[key].shape[0]) for key in required}
+            if len(lengths) != 1:
+                return False
+            if expected_fingerprint is not None:
+                stored = handle.attrs.get("separation_cache_fingerprint")
+                if stored != expected_fingerprint:
+                    return False
+            return True
+    except OSError:
+        return False
 
 
 def ensure_separated_event_h5(
@@ -174,6 +289,8 @@ def ensure_separated_event_h5(
     source_size: tuple[int, int],
     output_size: tuple[int, int],
     fps: float,
+    cache_fingerprint: str,
+    cache_metadata: dict,
 ) -> Path:
     """Build (or upgrade) an event-H5 cache that stores q_static/q_dynamic.
 
@@ -186,7 +303,7 @@ def ensure_separated_event_h5(
     from policies.edynvla.motion_separation import RawEventMotionSeparator
 
     cache_path = Path(cache_path)
-    if event_h5_has_confidence(cache_path, sensor):
+    if event_h5_has_confidence(cache_path, sensor, cache_fingerprint):
         return cache_path
     ensure_event_h5(
         aedat4_path,
@@ -225,6 +342,13 @@ def ensure_separated_event_h5(
             output.attrs["sensor"] = sensor
             output.attrs["source_events"] = str(Path(aedat4_path).resolve())
             output.attrs["separation"] = "stored_q"
+            output.attrs["separation_cache_schema_version"] = (
+                SEPARATION_CACHE_SCHEMA_VERSION
+            )
+            output.attrs["separation_cache_fingerprint"] = cache_fingerprint
+            output.attrs["separation_cache_metadata"] = json.dumps(
+                cache_metadata, sort_keys=True
+            )
             _write_event_group(output, sensor, events)
         os.replace(tmp_path, cache_path)
     finally:
@@ -287,7 +411,11 @@ def select_edv_samples(
         if assigned in ("train", "test"):
             take = assigned == split
         else:
-            is_test = (position + 1) % test_every == 0
+            # Keep the split stable while a large dataset is still being
+            # downloaded: missing/failed neighboring samples must not move an
+            # existing sample between train and test.
+            stable_index = int(sample.get("sample_index", position))
+            is_test = (stable_index + 1) % test_every == 0
             take = is_test if split == "test" else not is_test
         position += 1
         if split is None or take:
@@ -425,9 +553,10 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         parquets = sorted(data_dir.glob("*.parquet")) if data_dir.is_dir() else []
         return [
             parquets[0] if parquets else data_dir / "episode_missing.parquet",
-            sample_dir / "rgb" / f"{self.event_sensor}.mp4",
+            *(sample_dir / "rgb" / f"{camera}.mp4" for camera in self.cameras),
             sample_dir / "events" / f"{self.event_sensor}.aedat4",
             sample_dir / "support" / f"{self.event_sensor}_motion_support.h5",
+            sample_dir / "reproduction.json",
         ]
 
     def _load_parquet(self, sample: dict) -> dict:
@@ -473,37 +602,56 @@ class EDVSupportDataset(torch.utils.data.Dataset):
         timestamps = self._load_parquet(sample)["timestamp"]
         time_origin_s = float(timestamps[0]) if len(timestamps) else 0.0
         expected_count = sample.get("event_counts", {}).get(sensor)
-        if event_h5_has_confidence(cache_path, sensor):
-            return cache_path, True
         support_h5 = sample_dir / "support" / f"{sensor}_motion_support.h5"
+        rgb_path = sample_dir / "rgb" / f"{sensor}.mp4"
+        fingerprint, cache_metadata = separation_cache_fingerprint(
+            aedat4_path=aedat4_path,
+            support_h5_path=support_h5,
+            rgb_path=rgb_path,
+            event_code_root=self.event_config.event_code_root,
+            sensor=sensor,
+            time_origin_s=time_origin_s,
+            expected_count=expected_count,
+            source_size=self.event_config.source_size,
+            fps=self.event_config.fps,
+        )
+        if event_h5_has_confidence(cache_path, sensor, fingerprint):
+            return cache_path, True
         can_separate = (
             self.event_config.event_code_root is not None
             and support_h5.is_file()
             and (aedat4_path.is_file() or cache_path.is_file())
         )
-        if not can_separate:
-            ensure_event_h5(
+        with event_cache_lock(cache_path):
+            # Another worker may have completed the cache while this worker
+            # was waiting for the lock.
+            if event_h5_has_confidence(cache_path, sensor, fingerprint):
+                return cache_path, True
+            if not can_separate:
+                ensure_event_h5(
+                    aedat4_path,
+                    cache_path,
+                    sensor=sensor,
+                    time_origin_s=time_origin_s,
+                    expected_count=expected_count,
+                )
+                return cache_path, False
+            rgb_frames = decode_video(rgb_path)
+            ensure_separated_event_h5(
                 aedat4_path,
                 cache_path,
                 sensor=sensor,
                 time_origin_s=time_origin_s,
                 expected_count=expected_count,
+                support_h5_path=support_h5,
+                rgb_frames=rgb_frames,
+                event_code_root=self.event_config.event_code_root,
+                source_size=self.event_config.source_size,
+                output_size=self.event_config.output_size,
+                fps=self.event_config.fps,
+                cache_fingerprint=fingerprint,
+                cache_metadata=cache_metadata,
             )
-            return cache_path, False
-        rgb_frames = decode_video(sample_dir / "rgb" / f"{sensor}.mp4")
-        ensure_separated_event_h5(
-            aedat4_path,
-            cache_path,
-            sensor=sensor,
-            time_origin_s=time_origin_s,
-            expected_count=expected_count,
-            support_h5_path=support_h5,
-            rgb_frames=rgb_frames,
-            event_code_root=self.event_config.event_code_root,
-            source_size=self.event_config.source_size,
-            output_size=self.event_config.output_size,
-            fps=self.event_config.fps,
-        )
         return cache_path, True
 
     def _get_sample_bundle(self, sample: dict) -> _SampleBundle:
@@ -586,21 +734,27 @@ class EDVSupportDataset(torch.utils.data.Dataset):
             parquet["state"][frame_index]
         )
 
-        future_offset = max(
-            1,
-            round(
-                self.event_config.future_steps
-                * self.event_config.bin_seconds
-                * self.event_config.fps
-            ),
+        future_left, future_right, future_alpha, future_valid = (
+            future_frame_interpolation(
+                frame_index,
+                future_steps=self.event_config.future_steps,
+                bin_seconds=self.event_config.bin_seconds,
+                fps=self.event_config.fps,
+                n_frames=n_frames,
+            )
         )
-        future_index = frame_index + future_offset
-        clamped_future_index = min(future_index, n_frames - 1)
-        future_rgb = self._video_frame(bundle, self.event_config.sensor, clamped_future_index)
+        future_rgb = self._video_frame(
+            bundle, self.event_config.sensor, future_left
+        ).astype(np.float32)
+        if future_right != future_left:
+            right_rgb = self._video_frame(
+                bundle, self.event_config.sensor, future_right
+            ).astype(np.float32)
+            future_rgb = (1.0 - future_alpha) * future_rgb + future_alpha * right_rgb
         sample_data[FUTURE_RGB_KEY] = (
             torch.from_numpy(future_rgb).permute(2, 0, 1).float() / 255.0
         )
-        sample_data[FUTURE_RGB_VALID_KEY] = torch.tensor(future_index < n_frames)
+        sample_data[FUTURE_RGB_VALID_KEY] = torch.tensor(future_valid)
 
         actions = parquet["action"][frame_index : frame_index + self.action_horizon]
         valid_count = len(actions)

@@ -95,6 +95,7 @@ class DynamicVLAConfig(PreTrainedConfig):
     future_rgb_key: str = "observation.wam.future_rgb"
     future_rgb_valid_key: str = "observation.wam.future_rgb_valid"
     event_history_bins: int = 8
+    event_input_size: tuple[int, int] = (96, 128)
     event_hidden_size: int = 256
     event_patch_size: int = 16
     event_max_patches_per_bin: int = 8
@@ -137,6 +138,8 @@ class DynamicVLAConfig(PreTrainedConfig):
             raise ValueError("wam_future_steps must be positive")
         if self.wam_enabled and any(v < 1 for v in self.wam_grid_size):
             raise ValueError("wam_grid_size values must be positive")
+        if self.use_event_tokens and any(v < 1 for v in self.event_input_size):
+            raise ValueError("event_input_size values must be positive")
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):

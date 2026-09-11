@@ -2,6 +2,7 @@ import numpy as np
 import torch
 
 from policies.edynvla.data import (
+    future_frame_interpolation,
     voxelize_weighted_event_pair,
     voxelize_weighted_events,
 )
@@ -14,6 +15,31 @@ from policies.edynvla.event_wam import (
     multimodal_wam_loss,
     multimodal_wam_metrics,
 )
+
+
+def test_future_rgb_interpolates_at_exact_event_horizon():
+    left, right, alpha, valid = future_frame_interpolation(
+        4,
+        future_steps=10,
+        bin_seconds=0.01,
+        fps=25.0,
+        n_frames=20,
+    )
+    assert (left, right) == (6, 7)
+    assert alpha == 0.5
+    assert valid
+
+
+def test_future_rgb_marks_truncated_horizon_invalid():
+    left, right, alpha, valid = future_frame_interpolation(
+        18,
+        future_steps=10,
+        bin_seconds=0.01,
+        fps=25.0,
+        n_frames=20,
+    )
+    assert (left, right, alpha) == (19, 19, 0.0)
+    assert not valid
 
 
 def test_weighted_voxelization_preserves_time_polarity_and_weight():

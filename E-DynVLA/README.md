@@ -30,5 +30,18 @@ bash scripts/generate_edv_dataset_to_size.sh 500 cuda:2 cuda:3
 Large assets, datasets, environments, and checkpoints are external inputs and
 are not committed to this repository.
 
+Before distributed training, build the versioned event-separation cache once
+in a single process. This avoids several DataLoader workers decoding and
+separating the same large AEDAT4 episode concurrently:
+
+```bash
+python scripts/precompute_edv_event_cache.py \
+  --dataset-root /path/to/EDV_Support \
+  --v2e-root ../V2E-VLA
+```
+
+Training with the frozen backbone requires a pretrained DynamicVLA checkpoint;
+pass it with `--ckpt` or set `POLICY.CHECKPOINT`.
+
 See [docs/edynvla_architecture.md](docs/edynvla_architecture.md) for the model
 contract and [../THIRD_PARTY.md](../THIRD_PARTY.md) for retained upstream code.

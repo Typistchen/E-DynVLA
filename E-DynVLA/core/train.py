@@ -1,6 +1,6 @@
 
-import json
 import logging
+import math
 import os
 import shutil
 import time
@@ -94,6 +94,20 @@ def train(cfg):
         persistent_workers=False,
     )
 
+    # A frozen randomly initialized backbone cannot learn. Fail before model
+    # construction so a missing command-line checkpoint is never overlooked.
+    checkpoint = cfg.CONST.get("CKPT") or cfg.POLICY.get("CHECKPOINT")
+    if checkpoint and not os.path.exists(checkpoint):
+        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint}")
+    if not checkpoint and any(
+        cfg.POLICY.get(name, False)
+        for name in ("FREEZE_VISION_MODEL", "FREEZE_CONNECTOR", "FREEZE_TEXT_MODEL")
+    ):
+        raise ValueError(
+            "A pretrained checkpoint is required when the vision/connector/text "
+            "backbone is frozen. Pass --ckpt or set POLICY.CHECKPOINT."
+        )
+
     # Set up the policy
     policy = utils.helpers.get_policy(
         cfg.POLICY,
@@ -117,34 +131,26 @@ def train(cfg):
             )
         )
 
+    # ``-p`` initializes E-DynVLA from a base policy checkpoint.  Its saved
+    # epoch belongs to the source training run and must not skip E-DynVLA
+    # epochs (a real resume would also need optimizer/scheduler state).
     init_epoch = 0
-    if "CKPT" in cfg.CONST:
-        logging.info("Loading pretrained model from %s ..." % cfg.CONST.CKPT)
-        if cfg.CONST.CKPT is None or not os.path.exists(cfg.CONST.CKPT):
-            logging.warning(
-                "Checkpoint %s does not exist. Fallback to default checkpoint %s."
-                % (cfg.CONST.CKPT, cfg.POLICY.CHECKPOINT)
-            )
-            cfg.CONST.CKPT = cfg.POLICY.CHECKPOINT
-
-        if cfg.CONST.CKPT is not None:
-            if os.path.exists(os.path.join(cfg.CONST.CKPT, "config.json")):
-                with open(os.path.join(cfg.CONST.CKPT, "config.json")) as fp:
-                    model_cfg = json.load(fp)
-                    init_epoch = model_cfg.get("epoch", 0)
-            # Save the normalizers to enable migration to the new datasets
-            normalizers = {
-                n: getattr(policy, n)
-                for n in [
-                    "normalize_inputs",
-                    "normalize_targets",
-                    "unnormalize_outputs",
-                ]
-            }
-            policy.config.device = "cuda:%d" % local_rank
-            policy = policy.from_pretrained(cfg.CONST.CKPT, config=policy.config)
-            for k, v in normalizers.items():
-                setattr(policy, k, v)
+    if checkpoint:
+        cfg.CONST.CKPT = checkpoint
+        logging.info("Loading pretrained model from %s ..." % checkpoint)
+        # Save the normalizers to enable migration to the new datasets
+        normalizers = {
+            n: getattr(policy, n)
+            for n in [
+                "normalize_inputs",
+                "normalize_targets",
+                "unnormalize_outputs",
+            ]
+        }
+        policy.config.device = "cuda:%d" % local_rank
+        policy = policy.from_pretrained(checkpoint, config=policy.config)
+        for k, v in normalizers.items():
+            setattr(policy, k, v)
 
     if torch.cuda.is_available():
         policy = torch.nn.parallel.DistributedDataParallel(
@@ -162,11 +168,15 @@ def train(cfg):
         weight_decay=cfg.TRAIN.OPTIMIZER.WEIGHT_DECAY,
         betas=cfg.TRAIN.OPTIMIZER.BETAS,
     )
+    grad_accum_steps = int(cfg.TRAIN.GRAD_ACCUM_STEPS)
+    if grad_accum_steps < 1:
+        raise ValueError("TRAIN.GRAD_ACCUM_STEPS must be positive")
+    optimizer_steps_per_epoch = math.ceil(n_batches / grad_accum_steps)
     lr_scheduler = diffusers.optimization.get_scheduler(
         name=cfg.TRAIN.LR_SCHEDULER.NAME,
         optimizer=optimizer,
         num_warmup_steps=cfg.TRAIN.LR_SCHEDULER.N_WARMUP_STEPS,
-        num_training_steps=cfg.TRAIN.N_EPOCHS * n_batches,
+        num_training_steps=cfg.TRAIN.N_EPOCHS * optimizer_steps_per_epoch,
     )
 
     # Set up folders for logs, snapshot and checkpoints
@@ -194,6 +204,7 @@ def train(cfg):
 
         # Training loop
         policy.train()
+        optimizer.zero_grad(set_to_none=True)
         batch_end_time = time.perf_counter()
         for batch_idx, batch in enumerate(train_data_loader):
             n_itr = epoch_idx * n_batches + batch_idx
@@ -218,12 +229,20 @@ def train(cfg):
                     component_losses.setdefault(
                         name, utils.average_meter.AverageMeter()
                     ).update(loss_dict[name])
-            loss = loss / cfg.TRAIN.GRAD_ACCUM_STEPS
-            loss.backward()
-            if batch_idx % cfg.TRAIN.GRAD_ACCUM_STEPS == 0:
+            # The final accumulation group may contain fewer than
+            # ``grad_accum_steps`` batches. Scale by its actual size so the
+            # last optimizer update has the same magnitude as the others.
+            group_start = (batch_idx // grad_accum_steps) * grad_accum_steps
+            group_size = min(grad_accum_steps, n_batches - group_start)
+            (loss / group_size).backward()
+            should_step = (
+                (batch_idx + 1) % grad_accum_steps == 0
+                or batch_idx + 1 == n_batches
+            )
+            if should_step:
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
             train_losses.update(loss.item())
             batch_time.update(time.perf_counter() - batch_end_time)

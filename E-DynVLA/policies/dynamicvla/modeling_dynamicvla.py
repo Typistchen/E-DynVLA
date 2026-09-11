@@ -382,6 +382,18 @@ class DynamicVLAPolicy(PreTrainedPolicy):
             )
             for k in vla_cfg.input_features
         }
+        if vla_cfg.use_event_tokens:
+            event_h, event_w = vla_cfg.event_input_size
+            for key in (vla_cfg.static_event_key, vla_cfg.dynamic_event_key):
+                dummy_batch[key] = torch.zeros(
+                    1,
+                    vla_cfg.event_history_bins,
+                    2,
+                    event_h,
+                    event_w,
+                    dtype=torch.float32,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                )
         dummy_batch["task"] = ["dummy text input"]
         vla_model._get_action_chunk(dummy_batch)
         q_out.put({"initialized": True})
@@ -894,8 +906,11 @@ class DynamicVLAPolicy(PreTrainedPolicy):
         dynamic = batch[self.config.dynamic_event_key].float()
         if static.ndim == 5:
             return static, dynamic
-        if static.ndim == 6 and static.shape[1] == 1:
-            return static[:, 0], dynamic[:, 0]
+        if static.ndim == 6:
+            # Inference queues may retain multiple observation-time event
+            # windows. Each window already contains its own temporal bins, so
+            # only the newest observation window belongs in the tokenizer.
+            return static[:, -1], dynamic[:, -1]
         raise ValueError(
             "event inputs must have shape [B,T,2,H,W] "
             f"(received {tuple(static.shape)})"
@@ -914,7 +929,7 @@ def pad_tensor(tensor, max_len, pad_value=0):
     Returns:
         torch.Tensor: Shape (B, max_len, ...) or (B, max_len).
     """
-    b, d = torch.Tensor.shape[:2]
+    b, d = tensor.shape[:2]
 
     # Create a padded torch.Tensor of max_len and copy the existing values
     padded_tensor = torch.full(

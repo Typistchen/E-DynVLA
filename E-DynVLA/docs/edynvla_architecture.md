@@ -57,15 +57,21 @@ when its predictions are not needed.
 
 ## Dataset contract
 
-Use `scripts/build_edynvla_manifest.py` to index DOM episode HDF5 files and the
-corresponding eventized/separated HDF5 files. Simulator-only `segmentation` and
-`object_vel` are explicitly marked evaluation-only in the manifest.
+The main path is `policies.edynvla.edv_support.EDVSupportDataset`. Each EDV
+sample provides observation-aligned Parquet, RGB MP4, raw AEDAT4 and motion
+support HDF5. The adapter emits two RGB histories, the 6-DoF end-effector
+state, action chunks, static/dynamic event histories, future RGB and future
+event supervision. Set `EDV_SUPPORT_ROOT` to the external dataset root.
 
-`policies.edynvla.data.DOMEventDataset` reads that manifest directly and emits
-paired RGB, 7-DoF end-effector state, action chunks, static/dynamic histories,
-and future-event supervision. Set `EDYNVLA_DATA_ROOT` (or pass
-`dataset_root`) to the external dataset directory; large HDF5 files are not
-stored in Git.
+Raw AEDAT4 remains the source of truth. Before distributed training, run
+`scripts/precompute_edv_event_cache.py` once. It stores per-event
+`q_static/q_dynamic/q_illumination` and a cache fingerprint covering the raw
+events, RGB, support data and separator code. Steady-state workers then read
+only small timestamp slices and do not rerun motion separation.
+
+`DOMEventDataset` and `build_edynvla_manifest.py` remain available only for the
+legacy ten-demo HDF5 evaluation path. Simulator-only segmentation and object
+velocity are never model inputs.
 
 The existing ten-demo set is an integration and evaluation set, not enough to
 train a language/action model from scratch. Training should use the full DOM

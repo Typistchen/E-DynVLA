@@ -1,4 +1,5 @@
 easydict
+dv-processing
 h5py
 imageio
 lerobot==0.3.3
@@ -6,6 +7,7 @@ num2words
 numpy==1.26.4
 nvidia-ml-py
 opencv-python-headless<4.12
+pyarrow
 pylibmc
 pytest
 PyYAML
